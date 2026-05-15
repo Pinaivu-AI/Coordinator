@@ -31,6 +31,14 @@ impl EnclaveKeyPair {
     pub fn sign(&self, msg: &[u8]) -> Signature {
         self.signing_key.sign(msg)
     }
+
+    /// Access the underlying `SigningKey`. Callers must already be
+    /// inside the enclave trust boundary — exposing this lets us
+    /// share signing across protocol artefacts without each one
+    /// having to be wrapped in a bespoke helper.
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
 }
 
 #[cfg(test)]
