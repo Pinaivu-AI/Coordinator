@@ -1,0 +1,334 @@
+name: Deploy Coordinator
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-coordinator
+  cancel-in-progress: true
+
+env:
+  APP_DIR: pinaivu-coordinator
+  # Pure-Rust binary inside the enclave — no Node/TS sidecar to feed.
+  ENCLAVE_CPU: 2
+  ENCLAVE_MEM: 2048
+  # Inbound bridges
+  HTTP_VSOCK_PORT: 4000
+  LIBP2P_VSOCK_PORT: 4001
+  # Config injection
+  CONFIG_VSOCK_PORT: 7000
+  # Outbound proxies
+  POSTGRES_VSOCK_PORT: 8101
+  REDIS_VSOCK_PORT: 8102
+  # Log collectors
+  ENCLAVE_LOG_VSOCK_PORT: 5000
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Copy source to EC2 ────────────────────────────────────────────────
+      - name: Copy source to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PINAIVU_EC2_HOST }}
+          username: ${{ secrets.PINAIVU_EC2_USER }}
+          key: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          source: "Containerfile,src,Cargo.toml,Cargo.lock,Makefile,.gitignore,parent_forwarder.sh"
+          target: "~/pinaivu-coordinator/"
+          overwrite: true
+          rm: false
+
+      # ── Write env file to EC2 ─────────────────────────────────────────────
+      # PINAIVU_ENV_FILE is a single GitHub secret containing the full contents
+      # of the runtime .env (DATABASE_URL, REDIS_URL, PINAIVU_BIND,
+      # PINAIVU_LIBP2P_LISTEN, libp2p bootstrap peers, settlement RPCs, etc.).
+      # Store it in Settings → Secrets → PINAIVU_ENV_FILE.
+      - name: Write env file to EC2
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          PINAIVU_ENV_FILE: ${{ secrets.PINAIVU_ENV_FILE }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          printf '%s' "$PINAIVU_ENV_FILE" | \
+            ssh -o StrictHostKeyChecking=no \
+                -o ServerAliveInterval=30 \
+                -i /tmp/deploy_key \
+                "$EC2_USER@$EC2_HOST" \
+                "cat > ~/.env.runtime && chmod 600 ~/.env.runtime"
+          rm -f /tmp/deploy_key
+
+      # ── Install deps ──────────────────────────────────────────────────────
+      - name: Install dependencies
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          if command -v dnf &> /dev/null; then PKG="sudo dnf"; else PKG="sudo yum"; fi
+          if ! command -v docker &> /dev/null; then
+            $PKG install -y docker || (curl -fsSL https://get.docker.com | sudo sh)
+            sudo systemctl start docker && sudo systemctl enable docker
+            sudo usermod -aG docker $USER
+          fi
+          if ! command -v nitro-cli &> /dev/null; then
+            $PKG install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel
+            sudo usermod -aG ne $USER
+          fi
+          command -v socat &> /dev/null || $PKG install -y socat
+          command -v jq    &> /dev/null || $PKG install -y jq
+          echo "Dependencies ready"
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Build EIF on EC2 ──────────────────────────────────────────────────
+      # The Containerfile is a stagex multi-stage build that emits
+      # nitro.eif + nitro.pcrs into ./out via `--output type=local`.
+      - name: Build enclave image
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          cd ~/pinaivu-coordinator && rm -rf out && mkdir -p out
+          sudo docker build \
+            --platform linux/amd64 \
+            --progress=plain \
+            --output type=local,dest=out/ \
+            -f Containerfile . 2>&1 | tee out/docker.log
+          echo "--- PCR Measurements ---"
+          cat out/nitro.pcrs
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Tear down old enclave ─────────────────────────────────────────────
+      - name: Terminate old enclave
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          # Stop all host-side bridge/proxy services from the previous deploy
+          for svc in \
+            pinaivu-bridge-http \
+            pinaivu-bridge-libp2p \
+            pinaivu-logs \
+            pinaivu-outbound-postgres \
+            pinaivu-outbound-redis; do
+            sudo systemctl stop "$svc.service" 2>/dev/null || true
+          done
+          sudo nitro-cli terminate-enclave --all || true
+          sleep 5
+          # Update allocator config
+          ALLOC=/etc/nitro_enclaves/allocator.yaml
+          sudo sed -i "s/memory_mib:.*/memory_mib: 2048/" "$ALLOC"
+          sudo sed -i "s/cpu_count:.*/cpu_count: 2/"    "$ALLOC"
+          sudo systemctl enable nitro-enclaves-allocator.service || true
+          sudo systemctl reset-failed nitro-enclaves-allocator.service || true
+          sudo systemctl start nitro-enclaves-allocator.service
+          sudo systemctl is-active nitro-enclaves-allocator.service
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Launch new enclave ────────────────────────────────────────────────
+      - name: Launch enclave
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          sudo nitro-cli run-enclave \
+            --cpu-count 2 \
+            --memory 2048 \
+            --eif-path ~/pinaivu-coordinator/out/nitro.eif
+          sudo nitro-cli describe-enclaves | jq -r '.[0] | "CID: \(.EnclaveCID)  State: \(.State)"'
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Setup host-side VSOCK bridge + outbound systemd services ─────────
+      # Sources ~/.env.runtime to read DATABASE_URL and REDIS_URL for
+      # the outbound socat proxies.
+      - name: Setup VSOCK bridge
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+
+          # Load all env vars from the runtime file
+          set -a
+          # shellcheck source=/dev/null
+          source ~/.env.runtime
+          set +a
+
+          write_unit() {
+            dest="$1"; shift
+            printf '%s\n' "$@" | sudo tee "$dest" > /dev/null
+          }
+
+          CID=$(sudo nitro-cli describe-enclaves | jq -r '.[0].EnclaveCID // empty')
+          [ -z "$CID" ] && { echo "ERROR: no enclave CID"; exit 1; }
+
+          # ── Inbound: HTTPS clients → coordinator HTTP API ───────────────
+          write_unit /etc/systemd/system/pinaivu-bridge-http.service \
+            '[Unit]' \
+            'Description=Pinaivu coordinator HTTP bridge (TCP:4000 <-> VSOCK:4000)' \
+            'After=network.target' \
+            '[Service]' \
+            "ExecStart=/usr/bin/socat TCP-LISTEN:4000,reuseaddr,fork VSOCK-CONNECT:${CID}:4000" \
+            'Restart=always' \
+            'RestartSec=2' \
+            '[Install]' \
+            'WantedBy=multi-user.target'
+
+          # ── Inbound: libp2p peers → coordinator swarm ──────────────────
+          # External GPU nodes and other coordinators dial here.
+          write_unit /etc/systemd/system/pinaivu-bridge-libp2p.service \
+            '[Unit]' \
+            'Description=Pinaivu coordinator libp2p bridge (TCP:4001 <-> VSOCK:4001)' \
+            'After=network.target' \
+            '[Service]' \
+            "ExecStart=/usr/bin/socat TCP-LISTEN:4001,reuseaddr,fork VSOCK-CONNECT:${CID}:4001" \
+            'Restart=always' \
+            'RestartSec=2' \
+            '[Install]' \
+            'WantedBy=multi-user.target'
+
+          # ── Enclave log collector ──────────────────────────────────────
+          write_unit /etc/systemd/system/pinaivu-logs.service \
+            '[Unit]' \
+            'Description=Pinaivu enclave log collector (VSOCK:5000)' \
+            'After=network.target' \
+            '[Service]' \
+            'ExecStart=/usr/bin/socat VSOCK-LISTEN:5000,fork,reuseaddr OPEN:/tmp/coordinator.log,creat,append' \
+            'Restart=always' \
+            'RestartSec=2' \
+            '[Install]' \
+            'WantedBy=multi-user.target'
+
+          # ── Outbound: Postgres ─────────────────────────────────────────
+          PG_HOST=$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[^:]+://[^@]+@([^:/]+).*#\1#p')
+          PG_PORT=$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[^:]+://[^@]+@[^:]+:([0-9]+).*#\1#p')
+          PG_PORT="${PG_PORT:-5432}"
+          printf '[Unit]\nDescription=Pinaivu outbound Postgres (VSOCK:8101 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8101,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
+            "$PG_HOST" "$PG_PORT" "$PG_HOST" "$PG_PORT" \
+            | sudo tee /etc/systemd/system/pinaivu-outbound-postgres.service > /dev/null
+
+          # ── Outbound: Redis ────────────────────────────────────────────
+          REDIS_HOST=$(printf '%s' "$REDIS_URL" | sed -nE 's#^[a-z]+://([^:]+:)?[^@]+@([^:/@]+).*#\2#p')
+          REDIS_PORT=$(printf '%s' "$REDIS_URL" | sed -nE 's#.*@[^:]+:([0-9]+).*#\1#p')
+          REDIS_PORT="${REDIS_PORT:-6379}"
+          printf '[Unit]\nDescription=Pinaivu outbound Redis (VSOCK:8102 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8102,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
+            "$REDIS_HOST" "$REDIS_PORT" "$REDIS_HOST" "$REDIS_PORT" \
+            | sudo tee /etc/systemd/system/pinaivu-outbound-redis.service > /dev/null
+
+          # Truncate the log file so we only see the latest run's output
+          sudo systemctl stop pinaivu-logs.service 2>/dev/null || true
+          sudo truncate -s 0 /tmp/coordinator.log 2>/dev/null || true
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now \
+            pinaivu-bridge-http.service \
+            pinaivu-bridge-libp2p.service \
+            pinaivu-logs.service \
+            pinaivu-outbound-postgres.service \
+            pinaivu-outbound-redis.service
+
+          sleep 2
+          sudo systemctl is-active pinaivu-bridge-http.service
+          sudo systemctl is-active pinaivu-bridge-libp2p.service
+          echo "Bridges active: CID=$CID  TCP:4000->VSOCK:4000  TCP:4001->VSOCK:4001"
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Send config into the enclave ──────────────────────────────────────
+      # The enclave's config listener accepts KEY=VALUE lines on VSOCK:7000.
+      # Strips comments and blank lines from ~/.env.runtime before piping.
+      - name: Send config to enclave
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          CID=$(sudo nitro-cli describe-enclaves | jq -r '.[0].EnclaveCID // empty')
+          if [ -z "$CID" ]; then echo "ERROR: Enclave not running"; exit 1; fi
+
+          for i in $(seq 1 10); do
+            if grep -v '^[[:space:]]*#' ~/.env.runtime \
+               | grep -v '^[[:space:]]*$' \
+               | socat - VSOCK-CONNECT:$CID:7000 2>/dev/null; then
+              echo "Config sent to enclave CID=$CID"
+              break
+            fi
+            echo "Waiting for enclave to accept config... (attempt $i/10)"
+            sleep 3
+          done
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Health check ──────────────────────────────────────────────────────
+      - name: Verify health
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          # Give the coordinator time to: load env, generate keypair, build
+          # libp2p swarm, bind both VSOCK listeners. Realistic startup ~10s.
+          sleep 10
+          for i in $(seq 1 24); do
+            if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
+              echo "Health check passed"
+              echo "--- /health ---"
+              curl -s http://localhost:4000/health
+              echo
+              echo "--- /enclave_health ---"
+              curl -s http://localhost:4000/enclave_health | jq .
+              echo "--- /get_attestation ---"
+              curl -s http://localhost:4000/get_attestation | jq '{pcr0, pcr1, pcr2, public_key}'
+              exit 0
+            fi
+            echo "Waiting for health... (attempt $i/24)"
+            sleep 5
+          done
+          echo "ERROR: Health check failed after 130s"
+          echo "--- Coordinator log ---"
+          tail -100 /tmp/coordinator.log 2>/dev/null || true
+          exit 1
+          REMOTE
+          rm -f /tmp/deploy_key
