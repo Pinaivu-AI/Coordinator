@@ -1,9 +1,8 @@
-//! Nautilus enclave primitives.
+//! Enclave primitives.
 //!
 //! Isolates everything that depends on the AWS Nitro Security Module
 //! (NSM) and the coordinator's Ed25519 signing identity from the rest
-//! of the coordinator crate. Mirrors the structure of
-//! `nautilus-memwal-relayer/src/nautilus-enclave/`.
+//! of the coordinator crate.
 //!
 //! - [`crypto`] — Ed25519 keypair (`EnclaveKeyPair`) generated inside
 //!   the enclave from NSM-backed entropy. Used for routing receipts,
