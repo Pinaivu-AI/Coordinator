@@ -1,0 +1,12 @@
+[package]
+name = "aws"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+nsm = []
+
+[dependencies]
+anyhow = "1"
+tracing = "0.1"

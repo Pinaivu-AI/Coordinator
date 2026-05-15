@@ -1,0 +1,18 @@
+[package]
+name = "nautilus-enclave"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# `aws` enables real NSM attestation via the AWS Nitro Security Module driver.
+# When disabled, a deterministic mock attestation is returned (dev mode).
+aws = []
+
+[dependencies]
+anyhow = "1"
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+rand = "0.8"
