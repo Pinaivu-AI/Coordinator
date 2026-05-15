@@ -3,7 +3,7 @@
 //! works on an air-gapped network.
 
 use super::{EscrowHandle, EscrowParams, SettlementAdapter};
-use crate::proof::ProofOfInference;
+use crate::protocol::ProofOfInference;
 
 pub struct FreeSettlement;
 

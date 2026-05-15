@@ -7,29 +7,24 @@
 //! and issues a signed routing receipt.
 
 mod api;
-mod config;
-mod dispatch_token;
-mod error;
+mod app;
 mod jobs;
 mod marketplace;
 mod mesh;
+mod observability;
 mod persistence;
-mod proof;
+mod protocol;
 mod reputation;
-mod routing_receipt;
 mod settlement;
-mod state;
-mod telemetry;
-mod types;
 
 use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    telemetry::init();
+    observability::init();
     tracing::info!("pinaivu coordinator starting (scaffold)");
-    let _cfg = config::Config::from_env()?;
-    let _state = state::AppState::new();
+    let _cfg = app::Config::from_env()?;
+    let _state = app::AppState::new();
     // TODO(scaffold): enclave identity -> mesh swarm -> http server ->
     // apalis monitor -> graceful shutdown.
     Ok(())

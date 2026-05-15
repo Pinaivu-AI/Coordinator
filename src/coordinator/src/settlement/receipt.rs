@@ -3,7 +3,7 @@
 //! escrow. Suitable for micro-payments or trusted clusters.
 
 use super::{EscrowHandle, EscrowParams, SettlementAdapter};
-use crate::proof::ProofOfInference;
+use crate::protocol::ProofOfInference;
 
 pub struct ReceiptSettlement;
 

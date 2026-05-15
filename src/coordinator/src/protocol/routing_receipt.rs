@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NodePeerId, RequestId};
+use super::types::{NodePeerId, RequestId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingReceipt {

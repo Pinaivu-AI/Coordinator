@@ -8,8 +8,7 @@ pub mod receipt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::proof::ProofOfInference;
-use crate::types::NanoX;
+use crate::protocol::{NanoX, ProofOfInference};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EscrowParams {

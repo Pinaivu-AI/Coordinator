@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NodePeerId, RequestId};
+use crate::protocol::{NodePeerId, RequestId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobStatus {

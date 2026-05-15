@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NanoX, NodePeerId, RequestId};
+use super::types::{NanoX, NodePeerId, RequestId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchToken {

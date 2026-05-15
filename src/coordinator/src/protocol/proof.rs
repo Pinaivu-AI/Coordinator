@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NanoX, NodePeerId, RequestId, SessionId};
+use super::types::{NanoX, NodePeerId, RequestId, SessionId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofOfInference {
