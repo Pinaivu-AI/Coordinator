@@ -43,6 +43,9 @@ hex = "0.4"
 anyhow = "1"
 thiserror = "2"
 
+# trait async
+async-trait = "0.1"
+
 # misc
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
