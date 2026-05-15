@@ -90,3 +90,5 @@ nautilus-enclave = { path = "../nautilus-enclave" }
 
 [dev-dependencies]
 tempfile = "3"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

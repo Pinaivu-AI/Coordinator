@@ -13,3 +13,14 @@ pub use types::{
     InferenceBid, InferenceRequest, NanoX, NodeCapabilities, NodePeerId, PrivacyLevel, RequestId,
     SessionId,
 };
+
+/// Errors returned by `verify()` on any signed protocol artefact.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VerifyError {
+    #[error("public key bytes are not a valid Ed25519 verifying key")]
+    InvalidPublicKey,
+    #[error("signature bytes are not a well-formed Ed25519 signature")]
+    InvalidSignatureBytes,
+    #[error("signature does not verify against the embedded public key")]
+    SignatureMismatch,
+}
