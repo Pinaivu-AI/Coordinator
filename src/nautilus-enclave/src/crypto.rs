@@ -39,6 +39,15 @@ impl EnclaveKeyPair {
     pub fn signing_key(&self) -> &SigningKey {
         &self.signing_key
     }
+
+    /// Raw 32-byte Ed25519 secret. Same trust caveat as
+    /// [`signing_key`]: callers must already be inside the enclave
+    /// trust boundary. Used to seed the libp2p identity so the
+    /// coordinator's network PeerId is derived from the same key
+    /// that's bound into its attestation document.
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
 }
 
 #[cfg(test)]
