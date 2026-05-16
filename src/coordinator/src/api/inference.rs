@@ -70,10 +70,18 @@ pub async fn chat_completions(
         .mesh()
         .publish_request(&inference_request)
         .await
-        .map_err(|e| AppError::Internal(format!("mesh publish: {e}")))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("NoPeersSubscribed") || msg.contains("InsufficientPeers") {
+                AppError::NoNodes("no GPU nodes subscribed to this model topic".into())
+            } else {
+                AppError::Internal(format!("mesh publish: {e}"))
+            }
+        })?;
 
     let bids = collect_bids(rx, DEFAULT_AUCTION_WINDOW).await;
-    let winner = pick_winner(&bids).ok_or(AppError::NotFound)?;
+    let winner = pick_winner(&bids)
+        .ok_or_else(|| AppError::NoNodes("auction closed with no bids".into()))?;
 
     let client_pubkey = decode_hex_pubkey(&req.client_pubkey_hex)?;
     let now_ms = SystemTime::now()

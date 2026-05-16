@@ -137,7 +137,7 @@ async fn empty_auction_returns_not_found() {
         .send()
         .await
         .expect("request");
-    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     handle.abort();
 }

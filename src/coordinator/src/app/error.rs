@@ -16,19 +16,24 @@ pub enum AppError {
     #[error("not found")]
     NotFound,
 
+    #[error("no nodes available: {0}")]
+    NoNodes(String),
+
     #[error("internal: {0}")]
     Internal(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::NoNodes(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, self.to_string()).into_response()
+        let body = serde_json::json!({ "error": self.to_string() });
+        (status, axum::Json(body)).into_response()
     }
 }
 

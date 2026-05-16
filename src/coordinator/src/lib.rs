@@ -33,6 +33,7 @@ pub fn build_router(state: app::AppState) -> Router {
             "/v1/chat/completions",
             post(api::inference::chat_completions),
         )
+        .route("/v1/nodes", get(api::nodes::list_nodes))
         .route("/v1/proofs/{request_id}", get(api::proofs::get_proof))
         .with_state(state)
 }
