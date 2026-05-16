@@ -7,8 +7,8 @@ use system::SystemError;
 
 #[cfg(feature = "nsm")]
 pub fn get_entropy(size: usize) -> Result<Vec<u8>, SystemError> {
-    use nsm_lib::{nsm_get_random, nsm_lib_init};
     use aws_nitro_enclaves_nsm_api::api::ErrorCode;
+    use nsm_lib::{nsm_get_random, nsm_lib_init};
 
     let nsm_fd = nsm_lib_init();
     if nsm_fd < 0 {
@@ -36,22 +36,32 @@ pub fn get_entropy(size: usize) -> Result<Vec<u8>, SystemError> {
     Ok(buf)
 }
 
-/// Called from init before spawning the main process. Sends an NSM
-/// heartbeat (in nsm builds) and loads the kernel module.
+/// Called from init at enclave startup.
+///
+/// Sends the NSM heartbeat on VSOCK:9000 → CID 3 (parent). This handshake
+/// is what nitro-cli waits for to consider the enclave "ready". It must run
+/// unconditionally — with or without the `nsm` feature — because it is
+/// required for boot even in entropy-fallback builds. If the socket isn't
+/// available (local dev without VSOCK), the call fails silently.
+///
+/// After the heartbeat, loads nsm.ko so the NSM device is available for
+/// attestation calls made later by the coordinator.
 pub fn init_platform() {
-    #[cfg(feature = "nsm")]
-    {
-        use libc::{close, read, write, AF_VSOCK};
-        use system::socket_connect;
-        let mut buf = [0xB7u8; 1];
-        if let Ok(fd) = socket_connect(AF_VSOCK, 9000, 3) {
-            unsafe {
-                write(fd, buf.as_ptr() as _, 1);
-                read(fd, buf.as_ptr() as _, 1);
-                close(fd);
-            }
-            system::dmesg("NSM heartbeat sent".into());
+    use libc::{close, read, write, AF_VSOCK};
+    use system::{dmesg, insmod, socket_connect};
+
+    let mut buf = [0xB7u8; 1];
+    if let Ok(fd) = socket_connect(AF_VSOCK, 9000, 3) {
+        unsafe {
+            write(fd, buf.as_mut_ptr() as _, 1);
+            read(fd, buf.as_mut_ptr() as _, 1);
+            close(fd);
         }
+        dmesg("NSM heartbeat sent".into());
     }
-    // nsm.ko is loaded directly in init/main.rs after init_platform returns.
+
+    match insmod("/nsm.ko", "") {
+        Ok(()) => dmesg("nsm.ko loaded".into()),
+        Err(e) => eprintln!("insmod nsm.ko: {e}"),
+    }
 }

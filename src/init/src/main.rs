@@ -18,7 +18,7 @@ mod config;
 use std::{io::BufReader, os::unix::io::FromRawFd, process::Command};
 
 use aws::{get_entropy, init_platform};
-use system::{dmesg, freopen, insmod, mount, reboot, seed_entropy, vsock_accept};
+use system::{dmesg, freopen, mount, reboot, seed_entropy, vsock_accept};
 
 /// CID of the parent partition. Fixed at 3 in the Nitro Enclave spec.
 const PARENT_CID: u32 = 3;
@@ -75,11 +75,6 @@ fn main() {
     match seed_entropy(4096, get_entropy) {
         Ok(n) => dmesg(format!("entropy seeded: {n} bytes")),
         Err(e) => eprintln!("entropy: {e}"),
-    }
-
-    match insmod("/nsm.ko", "0") {
-        Ok(()) => dmesg("nsm.ko loaded".into()),
-        Err(e) => eprintln!("insmod nsm.ko: {e}"),
     }
 
     dmesg("pinaivu coordinator enclave booted".into());

@@ -11,6 +11,7 @@ nsm = ["dep:nsm-lib", "dep:aws-nitro-enclaves-nsm-api"]
 
 [dependencies]
 system = { path = "../system" }
+libc = "0.2"
 anyhow = "1"
 
 # NSM library — only compiled when the `nsm` feature is enabled.
