@@ -1,20 +1,139 @@
-# Reproducible enclave image build for the Pinaivu coordinator.
-#
-# Skeleton — fleshed out alongside the init crate. Final target produces
-# `coordinator.eif` and `coordinator.pcrs` via stagex multi-stage build.
-
 # syntax=docker/dockerfile:1.7
+#
+# Reproducible Nitro Enclave image for the Pinaivu coordinator.
+# Every base image is pinned by digest so the build is bit-for-bit
+# reproducible across machines given the same source tree.
+#
+# Stages:
+#   base    — stagex toolchain assembled from pinned images
+#   build   — cross-compile coordinator + init to musl static binaries
+#   pack    — assemble the cpio initramfs
+#   eif     — invoke eif_build → coordinator.eif + coordinator.pcrs
+#   install — collect outputs into /rootfs for --output extraction
 
+# ── Pinned stagex base images ────────────────────────────────────────────────
+FROM stagex/core-binutils@sha256:72e606de19add996ddff23946d2b2d8349d34530a668a5d0d4a5706741e197c8 AS core-binutils
+FROM stagex/core-ca-certificates@sha256:6f1b69f013287af74340668d7a6f14de8ff5555e60e7c4ef1a643a78ed1629bd AS core-ca-certificates
+FROM stagex/core-gcc@sha256:2a12ad577ed0cbc63b3bffa89f17aa21fbedc2ec4f4e239b6fa194930f0f674b AS core-gcc
+FROM stagex/core-git@sha256:441316b17e020eb28d31ccaec2197d61646519bb564da8af3e5eea7642363034 AS core-git
+FROM stagex/core-zlib@sha256:7d9dbe4ca873b75f3c7c8e35105f8d273db66a179e9678704c0510dc441ae4ca AS core-zlib
+FROM stagex/core-llvm@sha256:d9d611f8db790113a5a70655d01dd47e72b10ce32b073493bba2303926c52ecb AS core-llvm
+FROM stagex/core-openssl@sha256:a42aaff7895410d7823913e27c680b6b85ce2cb91489a5f4c875fa17e5d0aa5b AS core-openssl
+FROM stagex/core-rust@sha256:a531ef1d2bca71d46ffe532679a8a9ae52ad29a5dafdc93f3a1e94b43522a278 AS core-rust
+FROM stagex/core-musl@sha256:fe241a40ee103f34e8e2bc5054de9bf67ffe00593d7412b6d61e6d2795425f7c AS core-musl
+FROM stagex/core-libunwind@sha256:f996cd69924786b142e3545023018682240138fba1b690d7109d015f44b2fa63 AS core-libunwind
+FROM stagex/core-pkgconf@sha256:8531798376b4a4a68d7d22eeda7d86cd7818746a742f8a99c5bb35f8fb1ebb14 AS core-pkgconf
+FROM stagex/core-busybox@sha256:4f3e3849acb54972e7c4f1d08c320526e0f8b314130bda68f83f821b02b4890b AS core-busybox
+FROM stagex/core-libzstd@sha256:c6ff15d1b2cf240d68c42c0614b675b60b9a0943b92ac326d3866d87af7d18fb AS core-libzstd
+FROM stagex/core-cmake@sha256:64d057d580f26d096603e13d1714619a4eb105a09023f26ce77ec90679bdb5be AS core-cmake
+FROM stagex/core-make@sha256:45523d7f448c58a2a1159b578a0c838010dac9b9a59bdd02f1e4dc533e618de6 AS core-make
+FROM stagex/user-eif_build@sha256:4cac953996e839b6202d85e6fe1f67db33c10432c43fceff13dfbf5d7e665574 AS user-eif_build
+FROM stagex/user-gen_initramfs@sha256:74d3581ed47022807b658bb38e8cdc05068472928c45c170f78054a27e97b634 AS user-gen_initramfs
+FROM stagex/linux-nitro@sha256:073c4603686e3bdc0ed6755fee3203f6f6f1512e0ded09eaea8866b002b04264 AS user-linux-nitro
+FROM stagex/user-cpio@sha256:9802cf7909c70e779ba8fe4923b0e190241c4d6ad329f3f0720c2a7f1d97cf37 AS user-cpio
+FROM stagex/user-socat@sha256:91cd7505fb97593e5790bdbb0ca62d5fd2bae0d70fda025d46871d0a36410f7d AS user-socat
+
+# ── Toolchain base (scratch + stagex layers) ─────────────────────────────────
 FROM scratch AS base
-# TODO(stagex): pull stagex core (musl libc, gcc, llvm, rust, binutils,
-# ca-certs, openssl, git, busybox, socat, kernel headers).
+ENV TARGET=x86_64-unknown-linux-musl
+ENV RUSTFLAGS="-C target-feature=+crt-static"
 
+COPY --from=core-busybox . /
+COPY --from=core-musl . /
+COPY --from=core-libunwind . /
+COPY --from=core-openssl . /
+COPY --from=core-zlib . /
+COPY --from=core-ca-certificates . /
+COPY --from=core-libzstd . /
+COPY --from=core-binutils . /
+COPY --from=core-pkgconf . /
+COPY --from=core-git . /
+COPY --from=core-rust . /
+COPY --from=user-gen_initramfs . /
+COPY --from=user-eif_build . /
+COPY --from=core-llvm . /
+COPY --from=core-gcc . /
+COPY --from=core-cmake . /
+COPY --from=core-make . /
+COPY --from=user-cpio . /
+COPY --from=user-linux-nitro /bzImage .
+COPY --from=user-linux-nitro /nsm.ko .
+COPY --from=user-linux-nitro /linux.config .
+
+# ── Rust build ───────────────────────────────────────────────────────────────
 FROM base AS build
-# TODO: cargo build --release --features aws -p coordinator -p init -p aws -p system
-# TODO: pack initramfs: coordinator binary, init binary, ca-certs,
-#       busybox, socat, nsm.ko, run.sh
-# TODO: invoke eif_build to emit coordinator.eif + coordinator.pcrs
+COPY . .
 
-FROM scratch AS install
-# COPY --from=build /out/coordinator.eif   /coordinator.eif
-# COPY --from=build /out/coordinator.pcrs  /coordinator.pcrs
+# Support crates (no aws feature — pure musl)
+RUN cargo build \
+    --release \
+    --target x86_64-unknown-linux-musl \
+    -p system -p aws -p init
+
+# Coordinator binary with real NSM + static musl
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
+RUN cargo build \
+    --locked \
+    --release \
+    --target x86_64-unknown-linux-musl \
+    --features aws \
+    -p coordinator -p nautilus-enclave
+
+# ── Initramfs assembly ────────────────────────────────────────────────────────
+FROM build AS pack
+ENV KBUILD_BUILD_TIMESTAMP=1
+WORKDIR /build_cpio
+RUN mkdir -p initramfs/etc/ssl/certs \
+             initramfs/proc initramfs/sys initramfs/dev \
+             initramfs/dev/pts initramfs/dev/shm initramfs/run \
+             initramfs/tmp
+
+# Kernel module and base filesystem
+COPY --from=user-linux-nitro /nsm.ko initramfs/nsm.ko
+COPY --from=core-busybox . initramfs
+COPY --from=core-musl . initramfs
+COPY --from=core-zlib . initramfs
+COPY --from=core-ca-certificates /etc/ssl/certs initramfs/etc/ssl/certs/
+COPY --from=user-socat /bin/socat initramfs/socat
+
+# Enclave binaries
+RUN cp /target/x86_64-unknown-linux-musl/release/init        initramfs/init
+RUN cp /target/x86_64-unknown-linux-musl/release/coordinator initramfs/coordinator
+
+# Build a reproducible cpio archive. Timestamps are zeroed and entries
+# are sorted so the archive is identical given the same file content.
+RUN <<-EOF
+    set -eux
+    cd initramfs
+    find . -exec touch -hcd "@0" "{}" +
+    find . -print0 \
+    | sort -z \
+    | cpio \
+        --null \
+        --create \
+        --verbose \
+        --reproducible \
+        --format=newc \
+    | gzip --best \
+    > /build_cpio/rootfs.cpio
+EOF
+
+# ── EIF build ─────────────────────────────────────────────────────────────────
+WORKDIR /build_eif
+RUN eif_build \
+    --kernel    /bzImage \
+    --kernel_config /linux.config \
+    --ramdisk   /build_cpio/rootfs.cpio \
+    --pcrs_output /coordinator.pcrs \
+    --output    /coordinator.eif \
+    --cmdline   'reboot=k initrd=0x2000000,3228672 root=/dev/ram0 panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd'
+
+# ── Collect outputs ───────────────────────────────────────────────────────────
+FROM base AS install
+WORKDIR /rootfs
+COPY --from=pack /coordinator.eif  .
+COPY --from=pack /coordinator.pcrs .
+COPY --from=pack /build_cpio/rootfs.cpio .
+
+FROM scratch AS package
+COPY --from=install /rootfs .
