@@ -6,15 +6,19 @@
 //!   3. Call aws::init_platform (initialises the NSM driver)
 //!   4. Seed the kernel entropy pool via the NSM RNG
 //!   5. Load nsm.ko
-//!   6. Spawn socat bridges so the coordinator can reach Postgres and Redis
+//!   6. Wait for the parent to push config over VSOCK:7000 (KEY=VALUE lines).
+//!      Received values are set as env vars for the coordinator process.
+//!   7. Spawn socat bridges so the coordinator can reach Postgres and Redis
 //!      through the parent host's VSOCK-to-TCP forwarders, and so inbound
 //!      HTTP + libp2p traffic reaches the coordinator from the parent.
-//!   7. Exec the coordinator binary (replaces this process as PID 1).
+//!   8. Exec the coordinator binary (replaces this process as PID 1).
 
-use std::process::Command;
+mod config;
+
+use std::{io::BufReader, os::unix::io::FromRawFd, process::Command};
 
 use aws::{get_entropy, init_platform};
-use system::{dmesg, freopen, insmod, mount, reboot, seed_entropy};
+use system::{dmesg, freopen, insmod, mount, reboot, seed_entropy, vsock_accept};
 
 /// CID of the parent partition. Fixed at 3 in the Nitro Enclave spec.
 const PARENT_CID: u32 = 3;
@@ -80,6 +84,22 @@ fn main() {
 
     dmesg("pinaivu coordinator enclave booted".into());
 
+    // ── Config injection: parent pushes KEY=VALUE over VSOCK:7000 ────────────
+    // The parent connects once, sends the env file, then closes the connection.
+    // We apply the received vars before starting the coordinator so secrets
+    // (DATABASE_URL, REDIS_URL, …) never appear in the enclave image.
+    match vsock_accept(7000) {
+        Ok(fd) => {
+            let reader = BufReader::new(unsafe { std::fs::File::from_raw_fd(fd) });
+            let pairs = config::read_config(reader);
+            for (k, v) in &pairs {
+                std::env::set_var(k, v);
+            }
+            dmesg(format!("config injected: {} vars", pairs.len()));
+        }
+        Err(e) => eprintln!("config vsock: {e}"),
+    }
+
     // ── Outbound bridges: enclave TCP → parent VSOCK → external TCP ──────────
     // Coordinator reads Postgres via 127.0.0.1:5432; parent forwards
     // VSOCK:8101 → Postgres TCP.
@@ -112,13 +132,18 @@ fn main() {
     //  the enclave console streams to the parent automatically in debug mode;
     //  production log collection wired in a later slice).
 
+    // Fixed env vars that belong to the enclave image, not the config bundle.
     std::env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
     std::env::set_var("PATH", "/bin:/sbin:/usr/bin:/usr/sbin:/");
-    std::env::set_var("PINAIVU_BIND", "127.0.0.1:4000");
-    std::env::set_var("PINAIVU_LIBP2P_LISTEN", "/ip4/0.0.0.0/tcp/4001");
-    // DATABASE_URL and REDIS_URL are injected from the config listener
-    // (VSOCK:7000, slice 8) before this point; fall back to the VSOCK-bridged
-    // local addresses if the env vars are not already set.
+    // Defaults for vars not supplied by the parent's config push.
+    // DATABASE_URL and REDIS_URL should come from VSOCK:7000; fall back to the
+    // VSOCK-bridged local addresses so local dev runs still work without a config push.
+    if std::env::var("PINAIVU_BIND").is_err() {
+        std::env::set_var("PINAIVU_BIND", "127.0.0.1:4000");
+    }
+    if std::env::var("PINAIVU_LIBP2P_LISTEN").is_err() {
+        std::env::set_var("PINAIVU_LIBP2P_LISTEN", "/ip4/0.0.0.0/tcp/4001");
+    }
     if std::env::var("DATABASE_URL").is_err() {
         std::env::set_var("DATABASE_URL", "postgresql://coordinator@127.0.0.1:5432/coordinator");
     }
