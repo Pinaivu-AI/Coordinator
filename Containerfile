@@ -126,7 +126,7 @@ RUN eif_build \
     --ramdisk   /build_cpio/rootfs.cpio \
     --pcrs_output /coordinator.pcrs \
     --output    /coordinator.eif \
-    --cmdline   'reboot=k panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd'
+    --cmdline   'reboot=k panic=1 pci=off console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd'
 
 # ── Collect outputs ───────────────────────────────────────────────────────────
 FROM base AS install
