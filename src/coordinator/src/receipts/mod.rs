@@ -1,7 +1,10 @@
 //! Routing-receipt archive — where the coordinator stores the signed
-//! audit artefacts it issues on completion. v1 ships an in-memory
-//! impl; the Postgres-backed impl replaces it in slice 6 behind the
-//! same trait.
+//! audit artefacts it issues on completion. The in-memory impl is used
+//! in tests and dev (no database required); the Postgres-backed impl
+//! is wired in when PINAIVU_DATABASE_URL is set.
+
+pub mod postgres;
+pub use postgres::PostgresReceiptArchive;
 
 use std::collections::HashMap;
 use std::sync::RwLock;

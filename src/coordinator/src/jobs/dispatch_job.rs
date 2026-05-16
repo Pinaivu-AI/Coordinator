@@ -1,6 +1,6 @@
-//! `DispatchJob` — the unit of work tracked by apalis. Records the
-//! primary peer, the deadline, the current status, and the opaque
-//! escrow handle so the worker can refund on timeout.
+//! `DispatchJob` — the unit of work tracked per accepted inference
+//! request. Written to Postgres on dispatch, read by the deadline
+//! watcher to fire refunds on timeout.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,18 @@ pub enum JobStatus {
     Completed,
     TimedOut,
     Refunded,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobStatus::Dispatched => "Dispatched",
+            JobStatus::Acked => "Acked",
+            JobStatus::Completed => "Completed",
+            JobStatus::TimedOut => "TimedOut",
+            JobStatus::Refunded => "Refunded",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
