@@ -31,7 +31,7 @@ run: out/coordinator.eif
 	sudo nitro-cli \
 		run-enclave \
 		--cpu-count 2 \
-		--memory 4096 \
+		--memory 512 \
 		--eif-path out/coordinator.eif
 	@echo ""
 	@echo "Enclave running. Start host bridges:"
@@ -45,7 +45,7 @@ run-debug: out/coordinator.eif
 	sudo nitro-cli \
 		run-enclave \
 		--cpu-count 2 \
-		--memory 4096 \
+		--memory 512 \
 		--eif-path out/coordinator.eif \
 		--debug-mode \
 		--attach-console

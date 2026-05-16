@@ -138,10 +138,14 @@ jobs:
           done
           sudo nitro-cli terminate-enclave --all || true
           sleep 5
-          # Update allocator config
+          # Compact memory so the allocator can reserve contiguous huge pages
+          echo 3 | sudo tee /proc/sys/vm/drop_caches   > /dev/null
+          echo 1 | sudo tee /proc/sys/vm/compact_memory > /dev/null
+          sleep 3
+          # Update allocator config (512 MB is ample for the musl coordinator binary)
           ALLOC=/etc/nitro_enclaves/allocator.yaml
-          sudo sed -i "s/memory_mib:.*/memory_mib: 2048/" "$ALLOC"
-          sudo sed -i "s/cpu_count:.*/cpu_count: 2/"    "$ALLOC"
+          sudo sed -i "s/memory_mib:.*/memory_mib: 512/" "$ALLOC"
+          sudo sed -i "s/cpu_count:.*/cpu_count: 2/"     "$ALLOC"
           sudo systemctl enable nitro-enclaves-allocator.service || true
           sudo systemctl reset-failed nitro-enclaves-allocator.service || true
           sudo systemctl start nitro-enclaves-allocator.service
@@ -162,7 +166,7 @@ jobs:
           set -e
           sudo nitro-cli run-enclave \
             --cpu-count 2 \
-            --memory 2048 \
+            --memory 512 \
             --eif-path ~/pinaivu-coordinator/out/coordinator.eif
           sudo nitro-cli describe-enclaves | jq -r '.[0] | "CID: \(.EnclaveCID)  State: \(.State)"'
           REMOTE
