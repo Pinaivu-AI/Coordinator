@@ -1,16 +1,14 @@
 //! Composed libp2p network behaviour for the coordinator.
 //!
 //! Layered for v1:
-//!   - `gossipsub` for marketplace topics (requests, bids, announces,
-//!     reputation roots).
+//!   - `gossipsub` for marketplace broadcast topics (requests, bids,
+//!     announces, reputation roots).
 //!   - `kademlia` for peer routing — bootstrap + peer_id → multiaddr
 //!     lookups when a bidder isn't already in our local cache.
 //!   - `identify` for protocol negotiation + observed-address learning.
 //!   - `ping` for liveness and RTT observation.
-//!
-//! Deferred to later slices: `mdns` (loopback discovery), `autonat`
-//! (NAT classification), `request_response::cbor::Behaviour` for the
-//! direct dispatch / completion-ack channel.
+//!   - `request_response::cbor` for the direct completion-ack channel:
+//!     node_1 → CompletionAck → coordinator → CompletionResponse.
 
 use std::time::Duration;
 
@@ -19,10 +17,12 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity, ValidationMode},
     identify, identity,
     kad::{self, store::MemoryStore},
-    ping,
+    ping, request_response,
     swarm::NetworkBehaviour,
     PeerId, StreamProtocol,
 };
+
+use super::completion_proto::{CompletionAck, CompletionResponse, COMPLETION_PROTOCOL};
 
 /// Application-level protocol version reported by `identify`.
 pub const PROTOCOL_VERSION: &str = "/pinaivu/coordinator/1.0.0";
@@ -37,6 +37,7 @@ pub struct PinaivuBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
+    pub completion: request_response::cbor::Behaviour<CompletionAck, CompletionResponse>,
 }
 
 impl PinaivuBehaviour {
@@ -78,11 +79,17 @@ impl PinaivuBehaviour {
             ping::Config::new().with_interval(Duration::from_secs(15)),
         );
 
+        let completion = request_response::cbor::Behaviour::new(
+            [(COMPLETION_PROTOCOL, request_response::ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+
         Ok(Self {
             gossipsub,
             kademlia,
             identify,
             ping,
+            completion,
         })
     }
 }

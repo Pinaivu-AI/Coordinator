@@ -1,12 +1,12 @@
 //! Swarm-driving event loop.
 //!
 //! Owns the libp2p `Swarm`, accepts [`MeshCommand`]s over an mpsc
-//! channel, and routes inbound gossipsub messages back to whichever
-//! auction is currently collecting bids for that request_id.
+//! channel, routes inbound gossipsub messages to auction bid collectors,
+//! and handles inbound completion-ack requests from primary nodes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -14,6 +14,7 @@ use libp2p::{
     gossipsub::{self, IdentTopic},
     identify, kad,
     multiaddr::Protocol,
+    request_response,
     swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
@@ -22,14 +23,13 @@ use tokio::time::interval;
 use uuid::Uuid;
 
 use super::behaviour::{PinaivuBehaviour, PinaivuBehaviourEvent};
+use super::completion_proto::{CompletionAck, CompletionResponse};
 use super::peer_registry::PeerRegistry;
 use super::topics::{ANNOUNCE, BIDS, INFERENCE_ANY, REPUTATION};
-use crate::protocol::{InferenceBid, InferenceRequest, NodeCapabilities};
+use crate::protocol::{InferenceBid, InferenceRequest, NodeCapabilities, NodePeerId, RoutingReceipt};
+use crate::receipts::ReceiptArchive;
 
-/// Capacity of the per-auction bid channel. 64 covers a realistic
-/// upper bound on bids per 200 ms window for v1.
 const BID_CHANNEL_CAPACITY: usize = 64;
-/// How often the event loop sweeps stale peers from the registry.
 const EVICT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Commands sent from a [`super::Libp2pMesh`] handle into the event loop.
@@ -47,14 +47,24 @@ pub enum MeshCommand {
     },
 }
 
+/// Minimal metadata stored per in-flight request so the completion
+/// handler can populate the routing receipt without a database round-trip.
+/// Slice 6 (Apalis) will replace this with a Postgres-backed job record.
+struct InFlightMeta {
+    client_id: String,
+    bid_set_hash: [u8; 32],
+}
+
 pub struct EventLoop {
     swarm: Swarm<PinaivuBehaviour>,
     cmd_rx: mpsc::Receiver<MeshCommand>,
     bid_subscribers: HashMap<Uuid, mpsc::Sender<InferenceBid>>,
     peer_registry: Arc<PeerRegistry>,
-    /// Listen addresses observed via `SwarmEvent::NewListenAddr`,
-    /// already wrapped with the `/p2p/<peer_id>` suffix so they're
-    /// dialable verbatim.
+    enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
+    receipt_archive: Arc<dyn ReceiptArchive>,
+    /// Per-request metadata keyed by request_id. Populated on publish,
+    /// consumed on completion-ack.
+    in_flight: HashMap<Uuid, InFlightMeta>,
     listen_addrs: Vec<Multiaddr>,
     ready_tx: Option<oneshot::Sender<()>>,
 }
@@ -65,12 +75,17 @@ impl EventLoop {
         cmd_rx: mpsc::Receiver<MeshCommand>,
         peer_registry: Arc<PeerRegistry>,
         ready_tx: oneshot::Sender<()>,
+        enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
+        receipt_archive: Arc<dyn ReceiptArchive>,
     ) -> Self {
         Self {
             swarm,
             cmd_rx,
             bid_subscribers: HashMap::new(),
             peer_registry,
+            enclave_key,
+            receipt_archive,
+            in_flight: HashMap::new(),
             listen_addrs: Vec::new(),
             ready_tx: Some(ready_tx),
         }
@@ -118,12 +133,23 @@ impl EventLoop {
             )) => {
                 self.handle_gossip_message(propagation_source, message).await;
             }
+            SwarmEvent::Behaviour(PinaivuBehaviourEvent::Completion(
+                request_response::Event::Message {
+                    peer,
+                    message:
+                        request_response::Message::Request {
+                            channel, request, ..
+                        },
+                    ..
+                },
+            )) => {
+                self.handle_completion_ack(peer, request, channel).await;
+            }
             SwarmEvent::Behaviour(PinaivuBehaviourEvent::Identify(
                 identify::Event::Received { peer_id, info, .. },
             )) => {
                 let addrs = info.listen_addrs.clone();
                 self.peer_registry.observe_addrs(peer_id, addrs.clone());
-                // Feed observed addresses into Kademlia for routing.
                 for addr in addrs {
                     self.swarm
                         .behaviour_mut()
@@ -141,6 +167,95 @@ impl EventLoop {
             }
             _ => {}
         }
+    }
+
+    async fn handle_completion_ack(
+        &mut self,
+        sender: PeerId,
+        ack: CompletionAck,
+        channel: request_response::ResponseChannel<CompletionResponse>,
+    ) {
+        tracing::info!(
+            request_id = %ack.request_id,
+            sender = %sender,
+            "completion ack received"
+        );
+
+        // Verify the primary node's signature over the ack.
+        if let Err(e) = ack.verify_primary() {
+            tracing::warn!(request_id = %ack.request_id, err = %e, "completion ack primary sig invalid");
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .completion
+                .send_response(channel, CompletionResponse::rejected(format!("primary signature invalid: {e}")));
+            return;
+        }
+
+        // Verify every embedded proof.
+        if let Err(e) = ack.verify_all_proofs() {
+            tracing::warn!(request_id = %ack.request_id, err = %e, "completion ack proof invalid");
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .completion
+                .send_response(channel, CompletionResponse::rejected(format!("proof invalid: {e}")));
+            return;
+        }
+
+        let meta = self.in_flight.remove(&ack.request_id);
+        let client_id = meta.as_ref().map(|m| m.client_id.as_str()).unwrap_or("").to_string();
+        let bid_set_hash = meta.map(|m| m.bid_set_hash).unwrap_or([0u8; 32]);
+
+        // Derive helper peer ids from any proofs beyond the first.
+        let helper_peer_ids: Vec<NodePeerId> = ack
+            .proofs
+            .iter()
+            .skip(1)
+            .map(|p| p.node_peer_id.clone())
+            .collect();
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let primary_peer_id = ack
+            .proofs
+            .first()
+            .map(|p| p.node_peer_id.clone())
+            .unwrap_or_else(|| NodePeerId(sender.to_string()));
+
+        let receipt = RoutingReceipt {
+            request_id: ack.request_id,
+            client_id,
+            primary_peer_id,
+            helper_peer_ids,
+            bid_set_hash,
+            proof_ids: ack.proof_ids(),
+            aggregated_output_hash: ack.aggregated_output_hash,
+            timestamp_ms: now_ms,
+            coordinator_pubkey: [0u8; 32],
+            signature: Vec::new(),
+        }
+        .sign(self.enclave_key.signing_key());
+
+        if let Err(e) = self.receipt_archive.put(receipt.clone()).await {
+            tracing::error!(request_id = %ack.request_id, err = %e, "failed to store routing receipt");
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .completion
+                .send_response(channel, CompletionResponse::rejected("storage error"));
+            return;
+        }
+
+        tracing::info!(request_id = %ack.request_id, "routing receipt signed and stored");
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .completion
+            .send_response(channel, CompletionResponse::ok(receipt));
     }
 
     async fn handle_gossip_message(&mut self, _src: PeerId, message: gossipsub::Message) {
@@ -162,8 +277,8 @@ impl EventLoop {
                 tracing::warn!("malformed announce payload");
             }
         }
-        // INFERENCE_ANY: coordinators publish; subscribing keeps us in
-        // the mesh but the messages aren't actionable here.
+        // INFERENCE_ANY: coordinator publishes; subscribing keeps us in
+        // the mesh but the messages are not actionable here.
         // REPUTATION: handled in a later slice.
     }
 
@@ -198,13 +313,22 @@ impl EventLoop {
             .publish(topic, payload)
             .map_err(|e| anyhow::anyhow!("gossipsub publish: {e}"))?;
 
+        // Store minimal metadata so the completion handler can build
+        // the routing receipt without a DB round-trip (replaced by
+        // Apalis job records in slice 6).
+        self.in_flight.insert(
+            request.request_id,
+            InFlightMeta {
+                client_id: String::new(),
+                bid_set_hash: [0u8; 32],
+            },
+        );
+
         let (tx, rx) = mpsc::channel(BID_CHANNEL_CAPACITY);
         self.bid_subscribers.insert(request.request_id, tx);
         Ok(rx)
     }
 }
 
-/// Topics every coordinator subscribes to on startup. The coordinator
-/// is also a publisher on `INFERENCE_ANY`, but we subscribe so it
-/// stays in the topic mesh.
+/// Topics every coordinator subscribes to on startup.
 pub const SUBSCRIBED_TOPICS: &[&str] = &[BIDS, ANNOUNCE, INFERENCE_ANY, REPUTATION];

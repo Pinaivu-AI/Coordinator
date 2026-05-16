@@ -4,6 +4,7 @@
 //! reputation updates.
 
 pub mod behaviour;
+pub mod completion_proto;
 pub mod dispatch_proto;
 pub mod event_loop;
 pub mod peer_registry;
@@ -19,7 +20,9 @@ use libp2p::{gossipsub::IdentTopic, Multiaddr};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{InferenceBid, InferenceRequest};
+use crate::receipts::ReceiptArchive;
 
+pub use completion_proto::{CompletionAck, CompletionResponse};
 pub use peer_registry::{PeerEntry, PeerRegistry};
 pub use test_mesh::InMemoryMesh;
 
@@ -119,12 +122,18 @@ pub struct MeshHandle {
 /// marketplace topics, and spawn the [`EventLoop`] on a tokio task.
 /// Resolves once the first listen address is bound so callers know
 /// where to dial.
+///
+/// The same `Arc<EnclaveKeyPair>` is used to seed both the libp2p
+/// identity (so PeerId is derived from the attested key) and any
+/// future coordinator-side signing the event loop needs to do.
 pub async fn spawn_libp2p_mesh(
-    enclave_secret: [u8; 32],
+    enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
     listen_addr: Multiaddr,
     peer_registry: Arc<PeerRegistry>,
+    receipt_archive: Arc<dyn ReceiptArchive>,
 ) -> Result<MeshHandle> {
-    let identity = behaviour::libp2p_identity_from_ed25519_secret(&enclave_secret)?;
+    let secret = enclave_key.secret_bytes();
+    let identity = behaviour::libp2p_identity_from_ed25519_secret(&secret)?;
 
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(identity)
         .with_tokio()
@@ -156,7 +165,7 @@ pub async fn spawn_libp2p_mesh(
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (ready_tx, ready_rx) = oneshot::channel();
-    let event_loop = EventLoop::new(swarm, cmd_rx, peer_registry, ready_tx);
+    let event_loop = EventLoop::new(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive);
     let event_loop_task = tokio::spawn(event_loop.run());
 
     // Wait for the first NewListenAddr — bounded so a bad config
