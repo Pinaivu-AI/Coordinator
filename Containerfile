@@ -84,9 +84,10 @@ FROM build AS pack
 ENV KBUILD_BUILD_TIMESTAMP=1
 WORKDIR /build_cpio
 RUN mkdir -p initramfs/etc/ssl/certs \
+             initramfs/etc \
              initramfs/proc initramfs/sys initramfs/dev \
              initramfs/dev/pts initramfs/dev/shm initramfs/run \
-             initramfs/tmp
+             initramfs/tmp initramfs/sys/fs/cgroup
 
 # Kernel module and base filesystem
 COPY --from=user-linux-nitro /nsm.ko initramfs/nsm.ko

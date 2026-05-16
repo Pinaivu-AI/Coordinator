@@ -3,24 +3,26 @@
 //! Sequence:
 //!   1. Mount pseudo-filesystems (proc, sys, dev, …)
 //!   2. Reopen stdio on /dev/console
-//!   3. Call aws::init_platform (initialises the NSM driver)
-//!   4. Seed the kernel entropy pool via the NSM RNG
-//!   5. Load nsm.ko
-//!   6. Wait for the parent to push config over VSOCK:7000 (KEY=VALUE lines).
-//!      Received values are set as env vars for the coordinator process.
-//!   7. Spawn socat bridges so the coordinator can reach Postgres and Redis
-//!      through the parent host's VSOCK-to-TCP forwarders, and so inbound
-//!      HTTP + libp2p traffic reaches the coordinator from the parent.
-//!   8. Exec the coordinator binary (replaces this process as PID 1).
+//!   3. Call aws::init_platform (NSM heartbeat → nitro-cli ready signal, insmod nsm.ko)
+//!   4. Seed the kernel entropy pool
+//!   5. Bring up loopback (127.0.0.1) — required for all TCP binds inside the enclave
+//!   6. Wait for the parent to push config over VSOCK:7000 (KEY=VALUE lines)
+//!   7. Start socat VSOCK↔TCP bridges
+//!   8. Spawn the coordinator binary; tail its log file to parent VSOCK:5000
 
 mod config;
 
-use std::{io::BufReader, os::unix::io::FromRawFd, process::Command};
+use std::{
+    fs::{File, OpenOptions},
+    io::BufReader,
+    os::unix::io::FromRawFd,
+    process::Command,
+};
 
 use aws::{get_entropy, init_platform};
 use system::{dmesg, freopen, mount, reboot, seed_entropy, vsock_accept};
 
-/// CID of the parent partition. Fixed at 3 in the Nitro Enclave spec.
+/// CID of the parent partition — always 3 in the Nitro Enclave spec.
 const PARENT_CID: u32 = 3;
 
 fn init_rootfs() {
@@ -36,6 +38,7 @@ fn init_rootfs() {
         ("tmpfs", "/run", "tmpfs", no_dse, "mode=0755"),
         ("tmpfs", "/tmp", "tmpfs", no_dse, ""),
         ("sysfs", "/sys", "sysfs", no_dse, ""),
+        ("cgroup_root", "/sys/fs/cgroup", "tmpfs", no_dse, "mode=0755"),
     ];
 
     for (src, target, fstype, flags, data) in mounts {
@@ -59,10 +62,25 @@ fn init_console() {
     }
 }
 
-/// Spawn a socat bridge as a background process. Panics on exec failure.
+/// Bring up the loopback interface.
+///
+/// The kernel creates the `lo` device but leaves it down. Without it, any
+/// TCP bind to 127.0.0.1 (coordinator, socat bridges) silently fails.
+fn setup_loopback() {
+    let _ = Command::new("/bin/busybox")
+        .args(["ip", "addr", "add", "127.0.0.1/8", "dev", "lo"])
+        .status();
+    let _ = Command::new("/bin/busybox")
+        .args(["ip", "link", "set", "dev", "lo", "up"])
+        .status();
+    let _ = std::fs::write("/etc/hosts", "127.0.0.1 localhost\n");
+    dmesg("loopback up".into());
+}
+
+/// Spawn a socat bridge as a detached background process.
 fn bridge(left: &str, right: &str) {
     match Command::new("/socat").arg(left).arg(right).spawn() {
-        Ok(_) => dmesg(format!("socat {left} {right}")),
+        Ok(_) => dmesg(format!("bridge {left} ↔ {right}")),
         Err(e) => eprintln!("socat {left} {right}: {e}"),
     }
 }
@@ -77,15 +95,16 @@ fn main() {
         Err(e) => eprintln!("entropy: {e}"),
     }
 
-    dmesg("pinaivu coordinator enclave booted".into());
+    setup_loopback();
 
-    // ── Config injection: parent pushes KEY=VALUE over VSOCK:7000 ────────────
-    // The parent connects once, sends the env file, then closes the connection.
-    // We apply the received vars before starting the coordinator so secrets
-    // (DATABASE_URL, REDIS_URL, …) never appear in the enclave image.
+    dmesg("enclave booted".into());
+
+    // ── Config injection via VSOCK:7000 ──────────────────────────────────────
+    // The parent connects once after launching the enclave, sends KEY=VALUE
+    // lines, and closes the connection. Secrets never appear in the EIF image.
     match vsock_accept(7000) {
         Ok(fd) => {
-            let reader = BufReader::new(unsafe { std::fs::File::from_raw_fd(fd) });
+            let reader = BufReader::new(unsafe { File::from_raw_fd(fd) });
             let pairs = config::read_config(reader);
             for (k, v) in &pairs {
                 std::env::set_var(k, v);
@@ -95,44 +114,9 @@ fn main() {
         Err(e) => eprintln!("config vsock: {e}"),
     }
 
-    // ── Outbound bridges: enclave TCP → parent VSOCK → external TCP ──────────
-    // Coordinator reads Postgres via 127.0.0.1:5432; parent forwards
-    // VSOCK:8101 → Postgres TCP.
-    bridge(
-        "TCP-LISTEN:5432,reuseaddr,fork",
-        &format!("VSOCK-CONNECT:{PARENT_CID}:8101"),
-    );
-    // Coordinator reads Redis via 127.0.0.1:6379; parent forwards
-    // VSOCK:8102 → Redis TCP.
-    bridge(
-        "TCP-LISTEN:6379,reuseaddr,fork",
-        &format!("VSOCK-CONNECT:{PARENT_CID}:8102"),
-    );
-
-    // ── Inbound bridges: parent VSOCK → enclave TCP ───────────────────────────
-    // HTTP clients reach the coordinator (127.0.0.1:4000) via VSOCK:4000.
-    bridge(
-        "VSOCK-LISTEN:4000,reuseaddr,fork",
-        "TCP:127.0.0.1:4000",
-    );
-    // libp2p peers reach the swarm (127.0.0.1:4001) via VSOCK:4001.
-    bridge(
-        "VSOCK-LISTEN:4001,reuseaddr,fork",
-        "TCP:127.0.0.1:4001",
-    );
-
-    // ── Log forwarder: coordinator stdout → parent VSOCK:5000 ─────────────────
-    // Parent collects via: socat VSOCK-LISTEN:5000,reuseaddr,fork -
-    // (not a socat bridge here; coordinator writes to stdout/stderr which
-    //  the enclave console streams to the parent automatically in debug mode;
-    //  production log collection wired in a later slice).
-
-    // Fixed env vars that belong to the enclave image, not the config bundle.
+    // ── Apply env var defaults ────────────────────────────────────────────────
     std::env::set_var("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
     std::env::set_var("PATH", "/bin:/sbin:/usr/bin:/usr/sbin:/");
-    // Defaults for vars not supplied by the parent's config push.
-    // DATABASE_URL and REDIS_URL should come from VSOCK:7000; fall back to the
-    // VSOCK-bridged local addresses so local dev runs still work without a config push.
     if std::env::var("PINAIVU_BIND").is_err() {
         std::env::set_var("PINAIVU_BIND", "127.0.0.1:4000");
     }
@@ -146,10 +130,44 @@ fn main() {
         std::env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
     }
 
+    // ── VSOCK↔TCP bridges ────────────────────────────────────────────────────
+    // Outbound: coordinator reaches Postgres/Redis via local TCP;
+    // parent forwards the VSOCK side to the real external hosts.
+    bridge(
+        "TCP-LISTEN:5432,reuseaddr,fork",
+        &format!("VSOCK-CONNECT:{PARENT_CID}:8101"),
+    );
+    bridge(
+        "TCP-LISTEN:6379,reuseaddr,fork",
+        &format!("VSOCK-CONNECT:{PARENT_CID}:8102"),
+    );
+    // Inbound: parent delivers HTTP and libp2p traffic via VSOCK.
+    bridge("VSOCK-LISTEN:4000,reuseaddr,fork", "TCP:127.0.0.1:4000");
+    bridge("VSOCK-LISTEN:4001,reuseaddr,fork", "TCP:127.0.0.1:4001");
+
+    // ── Spawn coordinator ─────────────────────────────────────────────────────
+    // Redirect both streams to a temp file so we can tail it to the parent.
+    let log = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/coordinator.log")
+        .expect("open coordinator log");
+    let log2 = log.try_clone().expect("clone log fd");
+
     dmesg("starting coordinator".into());
     let mut child = Command::new("/coordinator")
+        .stdout(log)
+        .stderr(log2)
         .spawn()
-        .expect("failed to exec coordinator");
+        .expect("failed to spawn coordinator");
+
+    // Forward coordinator logs to the parent host (collects into /tmp/coordinator.log there).
+    // Uses tail -f so the socat process stays alive as long as the coordinator writes.
+    bridge(
+        "EXEC:'/bin/busybox tail -f /tmp/coordinator.log'",
+        &format!("VSOCK-CONNECT:{PARENT_CID}:5000"),
+    );
 
     match child.wait() {
         Ok(s) => dmesg(format!("coordinator exited: {s}")),
