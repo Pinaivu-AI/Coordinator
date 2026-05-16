@@ -3,13 +3,16 @@
 //! inference requests and receiving bids / capability announcements /
 //! reputation updates.
 
-pub mod behaviour;
-pub mod completion_proto;
-pub mod dispatch_proto;
 pub mod event_loop;
 pub mod peer_registry;
 pub mod test_mesh;
-pub mod topics;
+
+// Wire-format pieces (behaviour, topics, completion_proto) live in the
+// shared `pinaivu-protocol` crate so the node binary can reuse them.
+// Re-exported under their original paths so existing imports keep working.
+pub use pinaivu_protocol::mesh::behaviour;
+pub use pinaivu_protocol::mesh::completion_proto;
+pub use pinaivu_protocol::mesh::topics;
 
 use std::sync::Arc;
 use std::time::Duration;

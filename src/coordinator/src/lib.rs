@@ -11,10 +11,14 @@ pub mod marketplace;
 pub mod mesh;
 pub mod observability;
 pub mod persistence;
-pub mod protocol;
 pub mod receipts;
 pub mod reputation;
 pub mod settlement;
+
+// Wire-format types live in the shared `pinaivu-protocol` crate so the
+// node binary can reuse them. Re-exported here under `coordinator::protocol`
+// so existing call sites and tests keep compiling unchanged.
+pub use pinaivu_protocol as protocol;
 
 use anyhow::Result;
 use axum::{

@@ -9,7 +9,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libp2p::StreamProtocol;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ProofOfInference, RequestId, RoutingReceipt, VerifyError};
+use crate::{ProofOfInference, RequestId, RoutingReceipt, VerifyError};
 
 pub const COMPLETION_PROTOCOL: StreamProtocol =
     StreamProtocol::new("/pinaivu/completion/1.0.0");
