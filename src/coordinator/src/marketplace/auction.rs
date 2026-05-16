@@ -82,6 +82,7 @@ mod tests {
             price_per_1k: NanoX(price),
             latency_ms: latency,
             reputation,
+            http_endpoint: format!("http://node-{peer}.test"),
         }
     }
 

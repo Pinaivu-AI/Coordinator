@@ -140,6 +140,7 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
         price_per_1k: NanoX(50),
         latency_ms: 200,
         reputation: 0.95,
+        http_endpoint: "http://mock-node-primary.test:5000".into(),
     };
     let mock = spawn_mock_node(bid_template).await.expect("mock node");
 
@@ -205,7 +206,8 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
     let dispatch: ChatDispatch = resp.json().await.expect("json");
 
     assert_eq!(dispatch.dispatch_token.primary_peer_id.0, "MOCK-NODE-PRIMARY");
-    assert!(dispatch.node_url.contains("MOCK-NODE-PRIMARY"));
+    // node_url now comes from the bid's http_endpoint, not the peer-id.
+    assert_eq!(dispatch.node_url, "http://mock-node-primary.test:5000");
     assert_eq!(dispatch.dispatch_token.signature.len(), 64);
     assert_eq!(dispatch.dispatch_token._rest["request_id"], serde_json::Value::String(dispatch.request_id.to_string()));
 

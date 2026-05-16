@@ -49,6 +49,7 @@ fn bid(peer: &str, price: u64, latency: u32, reputation: f32) -> InferenceBid {
         price_per_1k: NanoX(price),
         latency_ms: latency,
         reputation,
+        http_endpoint: format!("http://node-{peer}.test:5000"),
     }
 }
 
@@ -105,7 +106,8 @@ async fn auction_picks_best_bid_and_token_verifies() {
     // Composite score makes B the winner (lowest price, lowest latency,
     // highest reputation).
     assert_eq!(dispatch.dispatch_token.primary_peer_id.0, "B-fast-cheap-rep");
-    assert!(dispatch.node_url.contains("B-fast-cheap-rep"));
+    // node_url is the winner bid's http_endpoint field.
+    assert_eq!(dispatch.node_url, "http://node-B-fast-cheap-rep.test:5000");
     assert_eq!(dispatch.dispatch_token.request_id, dispatch.request_id);
 
     // The dispatch token was signed by the coordinator's enclave key

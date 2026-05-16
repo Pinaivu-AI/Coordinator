@@ -43,6 +43,10 @@ pub struct InferenceBid {
     pub price_per_1k: NanoX,
     pub latency_ms: u32,
     pub reputation: f32,
+    /// HTTP endpoint the client will dial after the coordinator picks
+    /// this bid. The node advertises whatever URL it wants the client
+    /// to use (typically `http://<public_ip>:<port>`).
+    pub http_endpoint: String,
     // TODO: accepted_settlements, model info, capacity hints.
     // Deliberately NO `has_tee` field — GPU nodes are not TEE components.
 }

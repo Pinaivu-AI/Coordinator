@@ -104,10 +104,9 @@ pub async fn chat_completions(
     }
     .sign(state.enclave_key().signing_key());
 
-    // node_url derivation is a placeholder until libp2p `identify` is
-    // wired up to surface dialable addresses. The node's peer_id is
-    // returned here so the client knows who to call.
-    let node_url = format!("https://node/{}", winner.node_peer_id.0);
+    // Bids carry the winning node's HTTP endpoint directly — the node
+    // advertises its own URL so the coordinator doesn't have to guess.
+    let node_url = winner.http_endpoint.clone();
 
     Ok(Json(ChatCompletionDispatch {
         request_id,
