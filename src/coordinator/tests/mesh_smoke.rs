@@ -18,6 +18,7 @@ use coordinator::mesh::{
     topics::{BIDS, INFERENCE_ANY},
     PeerRegistry,
 };
+use coordinator::receipts::InMemoryReceiptArchive;
 use coordinator::protocol::{InferenceBid, InferenceRequest, NanoX, NodePeerId};
 use coordinator::{bind, build_router};
 use futures::StreamExt;
@@ -143,14 +144,14 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
     let mock = spawn_mock_node(bid_template).await.expect("mock node");
 
     // Spawn the coordinator's libp2p mesh on an ephemeral loopback
-    // port.
-    let mut secret = [0u8; 32];
-    OsRng.fill_bytes(&mut secret);
+    // port. Single enclave keypair shared between libp2p and HTTP.
+    let enclave_key = Arc::new(nautilus_enclave::EnclaveKeyPair::generate());
     let registry = Arc::new(PeerRegistry::new(Duration::from_secs(60)));
     let mesh_handle = spawn_libp2p_mesh(
-        secret,
+        enclave_key.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         registry.clone(),
+        Arc::new(InMemoryReceiptArchive::new()),
     )
     .await
     .expect("spawn libp2p mesh");
