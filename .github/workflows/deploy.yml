@@ -113,7 +113,7 @@ jobs:
             --output type=local,dest=out/ \
             -f Containerfile . 2>&1 | tee out/docker.log
           echo "--- PCR Measurements ---"
-          cat out/nitro.pcrs
+          cat out/coordinator.pcrs
           REMOTE
           rm -f /tmp/deploy_key
 
@@ -163,7 +163,7 @@ jobs:
           sudo nitro-cli run-enclave \
             --cpu-count 2 \
             --memory 2048 \
-            --eif-path ~/pinaivu-coordinator/out/nitro.eif
+            --eif-path ~/pinaivu-coordinator/out/coordinator.eif
           sudo nitro-cli describe-enclaves | jq -r '.[0] | "CID: \(.EnclaveCID)  State: \(.State)"'
           REMOTE
           rm -f /tmp/deploy_key
