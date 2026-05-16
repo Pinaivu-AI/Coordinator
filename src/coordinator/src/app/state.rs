@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use nautilus_enclave::EnclaveKeyPair;
 
 use crate::mesh::{Mesh, NoopMesh, PeerRegistry};
+use crate::receipts::{InMemoryReceiptArchive, ReceiptArchive};
 
 /// How long an un-refreshed peer stays in the in-enclave registry
 /// before being evicted. Five times the default announce interval —
@@ -22,35 +23,73 @@ pub struct AppState {
 }
 
 struct Inner {
-    enclave_key: EnclaveKeyPair,
+    enclave_key: Arc<EnclaveKeyPair>,
     mesh: Arc<dyn Mesh>,
     peer_registry: Arc<PeerRegistry>,
+    receipt_archive: Arc<dyn ReceiptArchive>,
     started_at_ms: u64,
 }
 
 impl AppState {
-    /// New state with a `NoopMesh` and an empty `PeerRegistry`.
-    /// Useful for `main.rs` before the libp2p task is spawned and
-    /// for tests that don't need a marketplace.
+    /// New state with a freshly-generated keypair, a `NoopMesh`, and
+    /// an empty `PeerRegistry`. Convenience for tests and dev.
     pub fn new() -> Self {
-        Self::with_mesh_and_registry(
+        Self::with_full(
+            Arc::new(EnclaveKeyPair::generate()),
             Arc::new(NoopMesh),
             Arc::new(PeerRegistry::new(DEFAULT_PEER_TTL)),
         )
     }
 
-    /// New state with an explicit mesh; the peer registry defaults to
-    /// an empty one. Existing tests use this with an `InMemoryMesh`.
+    /// New state with an explicit mesh; keypair and peer registry are
+    /// generated. Used by tests that inject an `InMemoryMesh`.
     pub fn with_mesh(mesh: Arc<dyn Mesh>) -> Self {
-        Self::with_mesh_and_registry(mesh, Arc::new(PeerRegistry::new(DEFAULT_PEER_TTL)))
+        Self::with_full(
+            Arc::new(EnclaveKeyPair::generate()),
+            mesh,
+            Arc::new(PeerRegistry::new(DEFAULT_PEER_TTL)),
+        )
     }
 
-    /// New state with an explicit mesh and peer registry — used by
-    /// `main.rs` when wiring `Libp2pMesh`, since the event loop and
-    /// the auction need to share the same registry.
+    /// New state with an explicit mesh and peer registry; the enclave
+    /// keypair is generated. Backward-compatible with existing tests.
     pub fn with_mesh_and_registry(
         mesh: Arc<dyn Mesh>,
         peer_registry: Arc<PeerRegistry>,
+    ) -> Self {
+        Self::with_full(
+            Arc::new(EnclaveKeyPair::generate()),
+            mesh,
+            peer_registry,
+        )
+    }
+
+    /// Fully-explicit constructor — used by `main.rs` so the libp2p
+    /// identity, the HTTP signing key, and the routing-receipt signing
+    /// key are all the same `EnclaveKeyPair`. Defaults to an in-memory
+    /// receipt archive; pass an explicit one via [`with_full_archive`]
+    /// for prod (Postgres) or tests that share the archive with a
+    /// libp2p event loop.
+    pub fn with_full(
+        enclave_key: Arc<EnclaveKeyPair>,
+        mesh: Arc<dyn Mesh>,
+        peer_registry: Arc<PeerRegistry>,
+    ) -> Self {
+        Self::with_full_archive(
+            enclave_key,
+            mesh,
+            peer_registry,
+            Arc::new(InMemoryReceiptArchive::new()),
+        )
+    }
+
+    /// Like [`with_full`] but takes an explicit receipt archive so the
+    /// HTTP layer and the mesh event loop share the same store.
+    pub fn with_full_archive(
+        enclave_key: Arc<EnclaveKeyPair>,
+        mesh: Arc<dyn Mesh>,
+        peer_registry: Arc<PeerRegistry>,
+        receipt_archive: Arc<dyn ReceiptArchive>,
     ) -> Self {
         let started_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -58,9 +97,10 @@ impl AppState {
             .unwrap_or(0);
         Self {
             inner: Arc::new(Inner {
-                enclave_key: EnclaveKeyPair::generate(),
+                enclave_key,
                 mesh,
                 peer_registry,
+                receipt_archive,
                 started_at_ms,
             }),
         }
@@ -68,6 +108,10 @@ impl AppState {
 
     pub fn enclave_key(&self) -> &EnclaveKeyPair {
         &self.inner.enclave_key
+    }
+
+    pub fn enclave_key_arc(&self) -> Arc<EnclaveKeyPair> {
+        self.inner.enclave_key.clone()
     }
 
     pub fn enclave_pubkey_bytes(&self) -> [u8; 32] {
@@ -80,6 +124,10 @@ impl AppState {
 
     pub fn peer_registry(&self) -> &Arc<PeerRegistry> {
         &self.inner.peer_registry
+    }
+
+    pub fn receipt_archive(&self) -> &Arc<dyn ReceiptArchive> {
+        &self.inner.receipt_archive
     }
 
     pub fn started_at_ms(&self) -> u64 {
