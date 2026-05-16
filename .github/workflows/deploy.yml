@@ -238,8 +238,9 @@ jobs:
             'WantedBy=multi-user.target'
 
           # ── Outbound: Postgres ─────────────────────────────────────────
-          PG_HOST=$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[^:]+://[^@]+@([^:/]+).*#\1#p')
-          PG_PORT=$(printf '%s' "$DATABASE_URL" | sed -nE 's#^[^:]+://[^@]+@[^:]+:([0-9]+).*#\1#p')
+          # Greedy .*@ matches up to the LAST @ so passwords containing @ work.
+          PG_HOST=$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@([^:/]+).*#\1#p')
+          PG_PORT=$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@[^:]+:([0-9]+).*#\1#p')
           PG_PORT="${PG_PORT:-5432}"
           printf '[Unit]\nDescription=Pinaivu outbound Postgres (VSOCK:8101 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8101,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
             "$PG_HOST" "$PG_PORT" "$PG_HOST" "$PG_PORT" \

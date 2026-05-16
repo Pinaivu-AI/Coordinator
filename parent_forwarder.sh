@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-extract_host() { printf '%s' "$1" | sed -nE 's#^[^:]+://([^@]+@)?([^:/]+).*#\2#p'; }
+extract_host() { printf '%s' "$1" | sed -nE 's#.*@([^:/]+).*#\1#p'; }
 extract_port() {
     local p
     p=$(printf '%s' "$1" | sed -nE 's#.*:([0-9]+)(/.*)?$#\1#p')
