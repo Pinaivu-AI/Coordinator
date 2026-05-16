@@ -5,8 +5,14 @@ edition = "2021"
 
 [features]
 default = []
-nsm = []
+# Enable real NSM (AWS Nitro Security Module) hardware calls.
+# Only meaningful inside an actual Nitro Enclave instance.
+nsm = ["dep:nsm-lib", "dep:aws-nitro-enclaves-nsm-api"]
 
 [dependencies]
+system = { path = "../system" }
 anyhow = "1"
-tracing = "0.1"
+
+# NSM library — only compiled when the `nsm` feature is enabled.
+nsm-lib = { git = "https://github.com/aws/aws-nitro-enclaves-nsm-api.git", rev = "8ec7eac72bbb2097f1058ee32c13e1ff232f13e8", package = "nsm-lib", optional = true }
+aws-nitro-enclaves-nsm-api = { git = "https://github.com/aws/aws-nitro-enclaves-nsm-api.git", rev = "8ec7eac72bbb2097f1058ee32c13e1ff232f13e8", package = "aws-nitro-enclaves-nsm-api", optional = true }
