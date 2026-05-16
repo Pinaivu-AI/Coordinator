@@ -30,6 +30,19 @@ if [ -z "${ENCLAVE_CID:-}" ]; then
 fi
 echo "Enclave CID: ${ENCLAVE_CID}"
 
+# ── Push config to enclave (VSOCK:7000) ──────────────────────────────────────
+# The enclave init process listens on VSOCK:7000 for one connection.
+# We send KEY=VALUE lines from ENV_FILE (default: .env.runtime) then close.
+# This is the only moment secrets (DATABASE_URL, REDIS_URL, …) enter the enclave;
+# they never appear in the EIF image or PCR measurements.
+ENV_FILE="${ENV_FILE:-.env.runtime}"
+if [ -f "${ENV_FILE}" ]; then
+    echo "Pushing config from ${ENV_FILE} → VSOCK:${ENCLAVE_CID}:7000"
+    socat - "VSOCK-CONNECT:${ENCLAVE_CID}:7000" < "${ENV_FILE}"
+else
+    echo "WARNING: ${ENV_FILE} not found — enclave will use built-in defaults"
+fi
+
 # ── Inbound: external TCP → enclave VSOCK ────────────────────────────────────
 # HTTP API (clients → coordinator port 4000)
 echo "TCP:4000 → VSOCK:${ENCLAVE_CID}:4000  (HTTP API)"
