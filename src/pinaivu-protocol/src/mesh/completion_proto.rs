@@ -111,7 +111,7 @@ impl CompletionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{NanoX, NodePeerId};
+    use crate::{NanoX, NodePeerId};
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     use uuid::Uuid;

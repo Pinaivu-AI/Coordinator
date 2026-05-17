@@ -5,7 +5,9 @@
 
 pub mod behaviour;
 pub mod completion_proto;
+pub mod recruit_proto;
 pub mod topics;
 
 pub use behaviour::{libp2p_identity_from_ed25519_secret, PinaivuBehaviour, PinaivuBehaviourEvent};
 pub use completion_proto::{CompletionAck, CompletionResponse, COMPLETION_PROTOCOL};
+pub use recruit_proto::{RecruitRequest, RecruitResponse, RECRUIT_PROTOCOL};

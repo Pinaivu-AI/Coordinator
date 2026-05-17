@@ -23,6 +23,7 @@ use libp2p::{
 };
 
 use super::completion_proto::{CompletionAck, CompletionResponse, COMPLETION_PROTOCOL};
+use super::recruit_proto::{RecruitRequest, RecruitResponse, RECRUIT_PROTOCOL};
 
 /// Application-level protocol version reported by `identify`.
 pub const PROTOCOL_VERSION: &str = "/pinaivu/coordinator/1.0.0";
@@ -37,7 +38,10 @@ pub struct PinaivuBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
+    /// node → coordinator: signed CompletionAck.
     pub completion: request_response::cbor::Behaviour<CompletionAck, CompletionResponse>,
+    /// primary node → helper node: signed RecruitRequest.
+    pub recruit: request_response::cbor::Behaviour<RecruitRequest, RecruitResponse>,
 }
 
 impl PinaivuBehaviour {
@@ -84,12 +88,18 @@ impl PinaivuBehaviour {
             request_response::Config::default(),
         );
 
+        let recruit = request_response::cbor::Behaviour::new(
+            [(RECRUIT_PROTOCOL, request_response::ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+
         Ok(Self {
             gossipsub,
             kademlia,
             identify,
             ping,
             completion,
+            recruit,
         })
     }
 }
