@@ -13,7 +13,7 @@ env:
   APP_DIR: pinaivu-coordinator
   # Pure-Rust binary inside the enclave — no Node/TS sidecar to feed.
   ENCLAVE_CPU: 2
-  ENCLAVE_MEM: 2048
+  ENCLAVE_MEM: 4096
   # Inbound bridges
   HTTP_VSOCK_PORT: 4000
   LIBP2P_VSOCK_PORT: 4001
@@ -142,9 +142,11 @@ jobs:
           echo 3 | sudo tee /proc/sys/vm/drop_caches   > /dev/null
           echo 1 | sudo tee /proc/sys/vm/compact_memory > /dev/null
           sleep 3
-          # Update allocator config (512 MB is ample for the musl coordinator binary)
+          # Allocator memory matches ENCLAVE_MEM. libp2p + axum + sqlx
+          # + apalis at idle needs more than the 512 MiB we first guessed
+          # — enclave was dying silently after the health check.
           ALLOC=/etc/nitro_enclaves/allocator.yaml
-          sudo sed -i "s/memory_mib:.*/memory_mib: 512/" "$ALLOC"
+          sudo sed -i "s/memory_mib:.*/memory_mib: 4096/" "$ALLOC"
           sudo sed -i "s/cpu_count:.*/cpu_count: 2/"     "$ALLOC"
           sudo systemctl enable nitro-enclaves-allocator.service || true
           sudo systemctl reset-failed nitro-enclaves-allocator.service || true
@@ -166,7 +168,7 @@ jobs:
           set -e
           sudo nitro-cli run-enclave \
             --cpu-count 2 \
-            --memory 512 \
+            --memory 4096 \
             --eif-path ~/pinaivu-coordinator/out/coordinator.eif
           sudo nitro-cli describe-enclaves | jq -r '.[0] | "CID: \(.EnclaveCID)  State: \(.State)"'
           REMOTE
