@@ -40,9 +40,13 @@ fn peer_id_from_ed25519(bytes: &[u8; 32]) -> Option<String> {
     Some(pk.to_peer_id().to_string())
 }
 
-pub async fn get_attestation(State(state): State<AppState>) -> Json<AttestationDoc> {
+pub async fn get_attestation(
+    State(state): State<AppState>,
+) -> Result<Json<AttestationDoc>, crate::app::AppError> {
     let pubkey = state.enclave_pubkey_bytes();
-    // Empty nonce is acceptable in the mock path; production code will
-    // accept a client-supplied nonce as a query parameter.
-    Json(nautilus_enclave::get_attestation(&pubkey, &[]))
+    // Empty nonce for now; production should accept a client-supplied
+    // nonce as a query parameter and bind it into the attestation doc.
+    let doc = nautilus_enclave::get_attestation(&pubkey, &[])
+        .map_err(|e| crate::app::AppError::Internal(format!("attestation: {e}")))?;
+    Ok(Json(doc))
 }
