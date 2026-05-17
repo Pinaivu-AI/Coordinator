@@ -136,6 +136,12 @@ jobs:
             pinaivu-outbound-redis; do
             sudo systemctl stop "$svc.service" 2>/dev/null || true
           done
+          # Kill any leftover manual socats from interactive debugging —
+          # otherwise they hold TCP:4000 / TCP:4001 / VSOCK:5000 and the
+          # systemd services below fail to bind ("activating" forever,
+          # is-active returns 3, the whole deploy aborts).
+          sudo pkill -9 -f 'socat.*VSOCK' 2>/dev/null || true
+          sudo pkill -9 -f 'socat.*TCP-LISTEN' 2>/dev/null || true
           sudo nitro-cli terminate-enclave --all || true
           sleep 5
           # Compact memory so the allocator can reserve contiguous huge pages
@@ -331,6 +337,21 @@ jobs:
               curl -s http://localhost:4000/enclave_health | jq .
               echo "--- /get_attestation ---"
               curl -s http://localhost:4000/get_attestation | jq '{pcr0, pcr1, pcr2, public_key}'
+
+              # Stability check — earlier deploys sometimes passed the
+              # initial probe and then the coordinator silently died.
+              # Re-poll after 60s; if uptime didn't climb, fail loud.
+              FIRST_UPTIME=$(curl -s http://localhost:4000/enclave_health | jq .uptime_ms)
+              echo "Uptime at first probe: ${FIRST_UPTIME} ms"
+              sleep 60
+              SECOND=$(curl -s http://localhost:4000/enclave_health 2>/dev/null | jq .uptime_ms)
+              echo "Uptime after 60s:       ${SECOND} ms"
+              if [ -z "$SECOND" ] || [ "$SECOND" = "null" ]; then
+                echo "ERROR: coordinator died between initial probe and 60s recheck"
+                sudo nitro-cli describe-enclaves | jq '.[0]'
+                tail -200 /tmp/coordinator.log
+                exit 1
+              fi
               exit 0
             fi
             echo "Waiting for health... (attempt $i/24)"
