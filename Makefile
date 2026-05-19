@@ -1,7 +1,7 @@
 REGISTRY := local
 .DEFAULT_GOAL := eif
 
-.PHONY: check build test clean eif run run-debug run-local stop logs status
+.PHONY: check build test clean eif run run-debug run-local stop logs status register-coordinator
 
 out:
 	mkdir -p out
@@ -63,6 +63,16 @@ logs:
 status:
 	@echo "=== ENCLAVE STATUS ==="
 	sudo nitro-cli describe-enclaves 2>/dev/null || echo "No enclaves running"
+
+# ── On-chain registration ─────────────────────────────────────────────────────
+# Reads out/coordinator.pcrs, pushes PCRs to EnclaveConfig on Sui,
+# then waits for the live enclave's /enclave_health to return
+# a non-null enclave_object_id.
+#
+# Requires sui CLI in PATH and the following env vars:
+#   PINAIVU_PACKAGE_ID  PINAIVU_ENCLAVE_CONFIG_ID  PINAIVU_CAP_ID
+register-coordinator: out/coordinator.pcrs
+	bash scripts/register-coordinator.sh
 
 # ── Host bridges ──────────────────────────────────────────────────────────────
 run-host:

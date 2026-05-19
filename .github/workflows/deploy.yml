@@ -11,7 +11,6 @@ concurrency:
 
 env:
   APP_DIR: pinaivu-coordinator
-  # Pure-Rust binary inside the enclave — no Node/TS sidecar to feed.
   ENCLAVE_CPU: 2
   ENCLAVE_MEM: 4096
   # Inbound bridges
@@ -22,6 +21,7 @@ env:
   # Outbound proxies
   POSTGRES_VSOCK_PORT: 8101
   REDIS_VSOCK_PORT: 8102
+  SUI_VSOCK_PORT: 8103
   # Log collectors
   ENCLAVE_LOG_VSOCK_PORT: 5000
 
@@ -40,7 +40,7 @@ jobs:
           host: ${{ secrets.PINAIVU_EC2_HOST }}
           username: ${{ secrets.PINAIVU_EC2_USER }}
           key: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
-          source: "Containerfile,src,Cargo.toml,Cargo.lock,Makefile,.gitignore,parent_forwarder.sh"
+          source: "Containerfile,src,Cargo.toml,Cargo.lock,Makefile,.gitignore,parent_forwarder.sh,scripts"
           target: "~/pinaivu-coordinator/"
           overwrite: true
           rm: false
@@ -133,7 +133,8 @@ jobs:
             pinaivu-bridge-libp2p \
             pinaivu-logs \
             pinaivu-outbound-postgres \
-            pinaivu-outbound-redis; do
+            pinaivu-outbound-redis \
+            pinaivu-outbound-sui; do
             sudo systemctl stop "$svc.service" 2>/dev/null || true
           done
           # Kill any leftover manual socats from interactive debugging —
@@ -265,6 +266,16 @@ jobs:
             "$REDIS_HOST" "$REDIS_PORT" "$REDIS_HOST" "$REDIS_PORT" \
             | sudo tee /etc/systemd/system/pinaivu-outbound-redis.service > /dev/null
 
+          # ── Outbound: Sui RPC ──────────────────────────────────────
+          # Sidecar (inside enclave) calls SUI_RPC_URL; host forwards it.
+          SUI_RPC_URL="${SUI_RPC_URL:-https://fullnode.mainnet.sui.io}"
+          SUI_HOST=$(printf '%s' "$SUI_RPC_URL" | sed -nE 's#https?://([^/:]+).*#\1#p')
+          SUI_PORT=$(printf '%s' "$SUI_RPC_URL" | sed -nE 's#https?://[^/:]+:?([0-9]*).*#\1#p')
+          SUI_PORT="${SUI_PORT:-443}"
+          printf '[Unit]\nDescription=Pinaivu outbound Sui RPC (VSOCK:8103 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8103,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
+            "$SUI_HOST" "$SUI_PORT" "$SUI_HOST" "$SUI_PORT" \
+            | sudo tee /etc/systemd/system/pinaivu-outbound-sui.service > /dev/null
+
           # Truncate the log file so we only see the latest run's output
           sudo systemctl stop pinaivu-logs.service 2>/dev/null || true
           sudo truncate -s 0 /tmp/coordinator.log 2>/dev/null || true
@@ -275,12 +286,13 @@ jobs:
             pinaivu-bridge-libp2p.service \
             pinaivu-logs.service \
             pinaivu-outbound-postgres.service \
-            pinaivu-outbound-redis.service
+            pinaivu-outbound-redis.service \
+            pinaivu-outbound-sui.service
 
           sleep 2
           sudo systemctl is-active pinaivu-bridge-http.service
           sudo systemctl is-active pinaivu-bridge-libp2p.service
-          echo "Bridges active: CID=$CID  TCP:4000->VSOCK:4000  TCP:4001->VSOCK:4001"
+          echo "Bridges active: CID=$CID  TCP:4000->VSOCK:4000  TCP:4001->VSOCK:4001  VSOCK:8103->Sui"
           REMOTE
           rm -f /tmp/deploy_key
 
@@ -361,5 +373,52 @@ jobs:
           echo "--- Coordinator log ---"
           tail -100 /tmp/coordinator.log 2>/dev/null || true
           exit 1
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Register coordinator on Sui ───────────────────────────────────────
+      # Writes the fresh PCRs to EnclaveConfig on-chain, then polls
+      # /enclave_health until enclave_object_id is non-null.
+      # All logic lives in scripts/register-coordinator.sh; this step
+      # just ships the operator credentials and runs it.
+      #
+      # Secrets needed:
+      #   PINAIVU_SUI_VARS      — newline-separated KEY=VALUE with
+      #                           PINAIVU_PACKAGE_ID, PINAIVU_ENCLAVE_CONFIG_ID,
+      #                           PINAIVU_CAP_ID, SUI_NETWORK
+      #   PINAIVU_SUI_KEYSTORE  — contents of ~/.sui/sui_config/sui.keystore
+      - name: Register coordinator on Sui
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          PINAIVU_SUI_VARS: ${{ secrets.PINAIVU_SUI_VARS }}
+          PINAIVU_SUI_KEYSTORE: ${{ secrets.PINAIVU_SUI_KEYSTORE }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+
+          printf '%s' "$PINAIVU_SUI_VARS"     > /tmp/sui_vars.env
+          printf '%s' "$PINAIVU_SUI_KEYSTORE" > /tmp/sui_keystore.json
+          scp -o StrictHostKeyChecking=no -i /tmp/deploy_key \
+              /tmp/sui_vars.env /tmp/sui_keystore.json \
+              "$EC2_USER@$EC2_HOST:/tmp/"
+          rm -f /tmp/sui_vars.env /tmp/sui_keystore.json
+
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          # Import operator keystore for this run
+          mkdir -p ~/.sui/sui_config
+          cp /tmp/sui_keystore.json ~/.sui/sui_config/sui.keystore
+          rm -f /tmp/sui_keystore.json
+          OPERATOR_ADDR=$(sui keytool list --json 2>/dev/null | jq -r '.[0].suiAddress')
+          sui client switch --address "$OPERATOR_ADDR" 2>/dev/null || true
+
+          # Load Sui-specific vars and run the registration script
+          set -a; source /tmp/sui_vars.env; set +a
+          rm -f /tmp/sui_vars.env
+
+          chmod +x ~/pinaivu-coordinator/scripts/register-coordinator.sh
+          ~/pinaivu-coordinator/scripts/register-coordinator.sh
           REMOTE
           rm -f /tmp/deploy_key
