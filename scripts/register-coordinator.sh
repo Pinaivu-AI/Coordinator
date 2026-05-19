@@ -37,14 +37,10 @@ if [ ! -f "$PCR_FILE" ]; then
     exit 1
 fi
 
-# ── Install sui CLI if missing ────────────────────────────────────────────────
 if ! command -v sui &> /dev/null; then
-    echo "sui CLI not found — installing latest release..."
-    LATEST=$(curl -sf https://api.github.com/repos/MystenLabs/sui/releases/latest | jq -r .tag_name)
-    curl -fsSL \
-        "https://github.com/MystenLabs/sui/releases/download/${LATEST}/sui-${LATEST}-ubuntu-x86_64.tgz" \
-        | sudo tar xz -C /usr/local/bin/ sui
-    echo "sui installed: $(sui --version)"
+    echo "ERROR: sui CLI not found in PATH." >&2
+    echo "Install it on the EC2 instance before running this script." >&2
+    exit 1
 fi
 
 # ── Configure network ─────────────────────────────────────────────────────────

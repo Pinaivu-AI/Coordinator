@@ -407,12 +407,10 @@ jobs:
 
           $SSH 'bash -s' << 'REMOTE'
           set -e
-          # Import operator keystore for this run
+          # Place operator keystore where the sui CLI expects it
           mkdir -p ~/.sui/sui_config
           cp /tmp/sui_keystore.json ~/.sui/sui_config/sui.keystore
           rm -f /tmp/sui_keystore.json
-          OPERATOR_ADDR=$(sui keytool list --json 2>/dev/null | jq -r '.[0].suiAddress')
-          sui client switch --address "$OPERATOR_ADDR" 2>/dev/null || true
 
           # Load Sui-specific vars and run the registration script
           set -a; source /tmp/sui_vars.env; set +a
