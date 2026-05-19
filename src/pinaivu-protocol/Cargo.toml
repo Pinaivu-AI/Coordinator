@@ -12,6 +12,7 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 thiserror = "2"
 anyhow = "1"
+bcs = "0.1"
 
 libp2p = { version = "0.56", features = [
     "tokio",
