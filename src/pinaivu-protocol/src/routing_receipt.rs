@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 use super::types::{NodePeerId, RequestId};
 use super::VerifyError;
 
+/// One payout entry inside a routing receipt. `sui_address` is the
+/// node's advertised `payout_address` from its bid; `amount_nanox` is
+/// the share the coordinator computed from this node's proof. The
+/// on-chain vault uses these to disburse from escrow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Payout {
+    pub sui_address: String,
+    pub amount_nanox: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingReceipt {
     pub request_id: RequestId,
@@ -18,6 +28,9 @@ pub struct RoutingReceipt {
     pub bid_set_hash: [u8; 32],
     pub proof_ids: Vec<[u8; 32]>,
     pub aggregated_output_hash: [u8; 32],
+    /// Per-node payouts the on-chain vault should execute against the
+    /// escrowed funds for `request_id`.
+    pub payouts: Vec<Payout>,
     pub timestamp_ms: u64,
     pub coordinator_pubkey: [u8; 32],
     pub signature: Vec<u8>,
@@ -34,6 +47,7 @@ impl RoutingReceipt {
             bid_set_hash: &'a [u8; 32],
             proof_ids: &'a Vec<[u8; 32]>,
             aggregated_output_hash: &'a [u8; 32],
+            payouts: &'a Vec<Payout>,
             timestamp_ms: u64,
             coordinator_pubkey: &'a [u8; 32],
         }
@@ -45,6 +59,7 @@ impl RoutingReceipt {
             bid_set_hash: &self.bid_set_hash,
             proof_ids: &self.proof_ids,
             aggregated_output_hash: &self.aggregated_output_hash,
+            payouts: &self.payouts,
             timestamp_ms: self.timestamp_ms,
             coordinator_pubkey: &self.coordinator_pubkey,
         };
@@ -88,6 +103,10 @@ mod tests {
             bid_set_hash: [4u8; 32],
             proof_ids: vec![[5u8; 32], [6u8; 32]],
             aggregated_output_hash: [7u8; 32],
+            payouts: vec![
+                Payout { sui_address: "0xabc".into(), amount_nanox: 1_000 },
+                Payout { sui_address: "0xdef".into(), amount_nanox: 500 },
+            ],
             timestamp_ms: 1_700_000_010_000,
             coordinator_pubkey: [0u8; 32],
             signature: Vec::new(),

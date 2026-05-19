@@ -47,6 +47,10 @@ pub struct InferenceBid {
     /// this bid. The node advertises whatever URL it wants the client
     /// to use (typically `http://<public_ip>:<port>`).
     pub http_endpoint: String,
+    /// Sui address where the on-chain vault should disburse this
+    /// node's share if it wins and serves the request. Required for
+    /// `vault::settle` to be able to pay this peer.
+    pub payout_address: String,
     // TODO: accepted_settlements, model info, capacity hints.
     // Deliberately NO `has_tee` field — GPU nodes are not TEE components.
 }

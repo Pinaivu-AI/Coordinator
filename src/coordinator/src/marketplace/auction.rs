@@ -83,6 +83,7 @@ mod tests {
             latency_ms: latency,
             reputation,
             http_endpoint: format!("http://node-{peer}.test"),
+            payout_address: format!("0x{:0>62}", peer),
         }
     }
 

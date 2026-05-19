@@ -49,6 +49,7 @@ fn bid(peer: &str, price: u64, latency: u32, reputation: f32) -> InferenceBid {
         price_per_1k: NanoX(price),
         latency_ms: latency,
         reputation,
+        payout_address: format!("0x{:0>62}", peer),
         http_endpoint: format!("http://node-{peer}.test:5000"),
     }
 }

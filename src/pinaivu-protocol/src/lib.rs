@@ -10,7 +10,7 @@ pub mod types;
 
 pub use dispatch_token::DispatchToken;
 pub use proof::ProofOfInference;
-pub use routing_receipt::RoutingReceipt;
+pub use routing_receipt::{Payout, RoutingReceipt};
 pub use types::{
     InferenceBid, InferenceRequest, NanoX, NodeCapabilities, NodePeerId, PrivacyLevel,
     RequestId, SessionId,

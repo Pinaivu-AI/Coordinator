@@ -36,6 +36,7 @@ async fn postgres_receipt_archive_roundtrip() {
         bid_set_hash: [1u8; 32],
         proof_ids: vec![[2u8; 32]],
         aggregated_output_hash: [3u8; 32],
+        payouts: vec![],
         timestamp_ms: 1_700_000_000_000,
         coordinator_pubkey: [0u8; 32],
         signature: vec![],

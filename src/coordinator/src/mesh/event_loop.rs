@@ -234,6 +234,10 @@ impl EventLoop {
             bid_set_hash,
             proof_ids: ack.proof_ids(),
             aggregated_output_hash: ack.aggregated_output_hash,
+            // Filled in by the payment-computation slice; the field is
+            // already committed to by the signature so receipts without
+            // payouts simply mean "no on-chain settlement yet".
+            payouts: Vec::new(),
             timestamp_ms: now_ms,
             coordinator_pubkey: [0u8; 32],
             signature: Vec::new(),
