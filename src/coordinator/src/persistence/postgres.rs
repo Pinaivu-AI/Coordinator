@@ -19,10 +19,15 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS routing_receipts (
-            request_id   UUID PRIMARY KEY,
-            receipt_json JSONB        NOT NULL,
-            stored_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            request_id      UUID PRIMARY KEY,
+            receipt_json    JSONB        NOT NULL,
+            stored_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            walrus_blob_id  TEXT
         );
+
+        -- Add walrus_blob_id to existing deployments that predate this column.
+        ALTER TABLE routing_receipts ADD COLUMN IF NOT EXISTS walrus_blob_id TEXT;
+        ALTER TABLE routing_receipts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
         CREATE TABLE IF NOT EXISTS dispatch_jobs (
             request_id           UUID    PRIMARY KEY,
