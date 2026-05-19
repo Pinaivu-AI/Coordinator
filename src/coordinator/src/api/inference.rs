@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::app::AppError;
-use crate::marketplace::auction::{collect_bids, pick_winner, DEFAULT_AUCTION_WINDOW};
+use crate::marketplace::auction::{collect_bids, pick_winner_for, DEFAULT_AUCTION_WINDOW};
 use crate::protocol::{DispatchToken, InferenceRequest, NanoX, PrivacyLevel};
 
 const DISPATCH_DEADLINE_MS: u64 = 60_000;
@@ -43,6 +43,10 @@ pub struct ChatCompletionRequest {
     pub max_price_nanox: Option<u64>,
     #[serde(default)]
     pub privacy: Option<String>,
+    /// Settlement IDs the client will accept, in preference order.
+    /// Omitting this is equivalent to `["free"]`.
+    #[serde(default)]
+    pub accepted_settlements: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,11 +63,18 @@ pub async fn chat_completions(
     let request_id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
 
+    let accepted_settlements = if req.accepted_settlements.is_empty() {
+        vec!["free".to_string()]
+    } else {
+        req.accepted_settlements.clone()
+    };
+
     let inference_request = InferenceRequest {
         request_id,
         session_id,
         model: req.model.clone(),
         privacy: parse_privacy(req.privacy.as_deref()),
+        accepted_settlements: accepted_settlements.clone(),
     };
 
     let rx = state
@@ -80,8 +91,8 @@ pub async fn chat_completions(
         })?;
 
     let bids = collect_bids(rx, DEFAULT_AUCTION_WINDOW).await;
-    let winner = pick_winner(&bids)
-        .ok_or_else(|| AppError::NoNodes("auction closed with no bids".into()))?;
+    let winner = pick_winner_for(&bids, &accepted_settlements)
+        .ok_or_else(|| AppError::NoNodes("no bids matched the requested settlement".into()))?;
 
     // Record peer_id → Sui payout address for every bidder so the
     // completion handler can build payment rows without a DB round-trip.

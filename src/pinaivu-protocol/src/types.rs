@@ -4,6 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_settlement_id() -> String {
+    "free".to_string()
+}
+
 pub type RequestId = uuid::Uuid;
 pub type SessionId = uuid::Uuid;
 
@@ -32,8 +36,10 @@ pub struct InferenceRequest {
     pub session_id: SessionId,
     pub model: String,
     pub privacy: PrivacyLevel,
-    // TODO: encrypted prompt, context blob id, budget,
-    // accepted_settlements, client pubkey.
+    /// Settlement IDs the client is willing to use, in preference order.
+    /// Empty means the client accepts any settlement (equivalent to `["free"]`).
+    #[serde(default)]
+    pub accepted_settlements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +57,12 @@ pub struct InferenceBid {
     /// node's share if it wins and serves the request. Required for
     /// `vault::settle` to be able to pay this peer.
     pub payout_address: String,
-    // TODO: accepted_settlements, model info, capacity hints.
+    /// Settlement ID this node supports for this bid (e.g. `"free"`, `"sui"`).
+    /// The coordinator will only select this bid if the client's
+    /// `accepted_settlements` includes this value (or is empty).
+    #[serde(default = "default_settlement_id")]
+    pub settlement_id: String,
+    // TODO: model info, capacity hints.
     // Deliberately NO `has_tee` field — GPU nodes are not TEE components.
 }
 
