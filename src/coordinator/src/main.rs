@@ -14,7 +14,7 @@ use base64::Engine;
 use coordinator::{
     app,
     jobs::{store::PgJobStore, worker::spawn_dispatch_worker},
-    mesh::{spawn_libp2p_mesh, PeerRegistry},
+    mesh::{spawn_libp2p_mesh_with_pg, PeerRegistry},
     observability,
     onchain::{spawn_registration, RegisteredEnclave, SidecarClient},
     persistence::{postgres as pg, redis as r},
@@ -64,6 +64,24 @@ async fn main() -> Result<()> {
         spawn_dispatch_worker(&job_store, pg_pool.clone(), settlement);
     tracing::info!("apalis dispatch-timeout worker spawned");
 
+    // ── Settlement worker ──────────────────────────────────────────────────
+    // Drains `pending` payment rows and submits vault::settle PTBs via
+    // the in-enclave sidecar. Only spawned when the sidecar is reachable.
+    let _settlement_worker_handle = match SidecarClient::from_env() {
+        Ok(sidecar) => {
+            use apalis_sql::postgres::PostgresStorage;
+            use coordinator::jobs::settlement_worker::{spawn_settlement_worker, SettlementJob};
+            let storage = PostgresStorage::<SettlementJob>::new(pg_pool.clone());
+            let handle = spawn_settlement_worker(pg_pool.clone(), Arc::new(sidecar), storage);
+            tracing::info!("apalis settlement worker spawned");
+            Some(handle)
+        }
+        Err(_) => {
+            tracing::warn!("sidecar unavailable — settlement worker not started");
+            None
+        }
+    };
+
     // ── Receipt archive ────────────────────────────────────────────────────
     let receipt_archive: Arc<dyn coordinator::receipts::ReceiptArchive> =
         Arc::new(PostgresReceiptArchive::new(pg_pool.clone()));
@@ -75,11 +93,12 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("PINAIVU_LIBP2P_LISTEN must be a multiaddr: {e}"))?;
 
-    let mesh_handle = spawn_libp2p_mesh(
+    let mesh_handle = spawn_libp2p_mesh_with_pg(
         enclave_key.clone(),
         listen_addr,
         peer_registry.clone(),
         receipt_archive.clone(),
+        Some(pg_pool.clone()),
     )
     .await?;
     for addr in &mesh_handle.listen_addrs {

@@ -158,6 +158,69 @@ app.post("/sui/register-enclave", async (req: Request, res: Response) => {
     }
 });
 
+// ── /sui/settle ─────────────────────────────────────────────────────────────
+// Build and submit a vault::settle PTB for one (request_id, payee, amount).
+// The receipt_b64 field is the BCS+base64 encoded signed RoutingReceipt
+// already produced by the coordinator; the sidecar passes it straight
+// through to the on-chain verify_completion_receipt call.
+const SettleSchema = z.object({
+    request_id: z.string(),
+    payee_sui_address: z.string(),
+    amount_nanox: z.number().int().positive(),
+    receipt_b64: z.string(),
+});
+
+const PINAIVU_VAULT_ID = (process.env.PINAIVU_VAULT_ID || "").trim();
+
+app.post("/sui/settle", async (req: Request, res: Response) => {
+    const parsed = SettleSchema.safeParse(req.body);
+    if (!parsed.success) {
+        return res.status(400).json({ error: "invalid request", details: parsed.error.issues });
+    }
+    if (!PINAIVU_PACKAGE_ID || !PINAIVU_VAULT_ID) {
+        return res.status(503).json({ error: "PINAIVU_PACKAGE_ID or PINAIVU_VAULT_ID not configured" });
+    }
+
+    const { request_id, payee_sui_address, amount_nanox, receipt_b64 } = parsed.data;
+
+    try {
+        const tx = new Transaction();
+        const receiptBytes = Buffer.from(receipt_b64, "base64");
+
+        tx.moveCall({
+            target: `${PINAIVU_PACKAGE_ID}::vault::settle`,
+            typeArguments: ["0x2::sui::SUI"],
+            arguments: [
+                tx.object(PINAIVU_VAULT_ID),
+                tx.object(PINAIVU_ENCLAVE_CONFIG_ID),
+                tx.pure.vector("u8", Array.from(Buffer.from(request_id))),
+                tx.pure.address(payee_sui_address),
+                tx.pure.u64(amount_nanox),
+                tx.pure.vector("u8", Array.from(receiptBytes)),
+            ],
+        });
+
+        const result = await suiClient.signAndExecuteTransaction({
+            signer: operatorKeypair,
+            transaction: tx,
+            options: { showEffects: true },
+        });
+
+        const status = (result.effects as any)?.status?.status ?? "unknown";
+        console.log(`[sidecar] settle tx=${result.digest} status=${status} payee=${payee_sui_address} amount=${amount_nanox}`);
+
+        if (status !== "success") {
+            const err = (result.effects as any)?.status?.error ?? "tx failed";
+            return res.status(500).json({ error: err, tx_digest: result.digest });
+        }
+
+        return res.json({ tx_digest: result.digest });
+    } catch (err: any) {
+        console.error("[sidecar] settle error:", err);
+        return res.status(500).json({ error: err.message ?? String(err) });
+    }
+});
+
 app.listen(PORT, "127.0.0.1", () => {
     console.log(`[sidecar] listening on 127.0.0.1:${PORT} (network=${NETWORK})`);
 });

@@ -26,7 +26,10 @@ use super::behaviour::{PinaivuBehaviour, PinaivuBehaviourEvent};
 use super::completion_proto::{CompletionAck, CompletionResponse};
 use super::peer_registry::PeerRegistry;
 use super::topics::{ANNOUNCE, BIDS, INFERENCE_ANY, REPUTATION};
-use crate::protocol::{InferenceBid, InferenceRequest, NodeCapabilities, NodePeerId, RoutingReceipt};
+use crate::payments;
+use crate::protocol::{
+    InferenceBid, InferenceRequest, NodeCapabilities, NodePeerId, Payout, RoutingReceipt,
+};
 use crate::receipts::ReceiptArchive;
 
 const BID_CHANNEL_CAPACITY: usize = 64;
@@ -38,6 +41,13 @@ pub enum MeshCommand {
         request: InferenceRequest,
         reply_tx: oneshot::Sender<Result<mpsc::Receiver<InferenceBid>>>,
     },
+    /// Called after the auction to record which peer_id maps to which
+    /// Sui payout address. Stored in `in_flight` so the completion
+    /// handler can build payment rows without a DB look-up.
+    SetPayoutAddresses {
+        request_id: Uuid,
+        addresses: HashMap<String, String>,
+    },
     Dial {
         addr: Multiaddr,
         reply_tx: oneshot::Sender<Result<()>>,
@@ -47,12 +57,13 @@ pub enum MeshCommand {
     },
 }
 
-/// Minimal metadata stored per in-flight request so the completion
-/// handler can populate the routing receipt without a database round-trip.
-/// Slice 6 (Apalis) will replace this with a Postgres-backed job record.
+/// Metadata stored per in-flight request so the completion handler can
+/// build the routing receipt and compute payouts without a DB round-trip.
 struct InFlightMeta {
     client_id: String,
     bid_set_hash: [u8; 32],
+    /// peer_id → Sui payout address, from winning bid + helper bids.
+    payout_addresses: HashMap<String, String>,
 }
 
 pub struct EventLoop {
@@ -62,6 +73,9 @@ pub struct EventLoop {
     peer_registry: Arc<PeerRegistry>,
     enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
     receipt_archive: Arc<dyn ReceiptArchive>,
+    /// Postgres pool for inserting payment rows after CompletionAck.
+    /// `None` when running in dev/test without Postgres.
+    pg_pool: Option<sqlx::PgPool>,
     /// Per-request metadata keyed by request_id. Populated on publish,
     /// consumed on completion-ack.
     in_flight: HashMap<Uuid, InFlightMeta>,
@@ -78,6 +92,18 @@ impl EventLoop {
         enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
         receipt_archive: Arc<dyn ReceiptArchive>,
     ) -> Self {
+        Self::with_pg(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive, None)
+    }
+
+    pub fn with_pg(
+        swarm: Swarm<PinaivuBehaviour>,
+        cmd_rx: mpsc::Receiver<MeshCommand>,
+        peer_registry: Arc<PeerRegistry>,
+        ready_tx: oneshot::Sender<()>,
+        enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
+        receipt_archive: Arc<dyn ReceiptArchive>,
+        pg_pool: Option<sqlx::PgPool>,
+    ) -> Self {
         Self {
             swarm,
             cmd_rx,
@@ -85,6 +111,7 @@ impl EventLoop {
             peer_registry,
             enclave_key,
             receipt_archive,
+            pg_pool,
             in_flight: HashMap::new(),
             listen_addrs: Vec::new(),
             ready_tx: Some(ready_tx),
@@ -205,7 +232,10 @@ impl EventLoop {
 
         let meta = self.in_flight.remove(&ack.request_id);
         let client_id = meta.as_ref().map(|m| m.client_id.as_str()).unwrap_or("").to_string();
-        let bid_set_hash = meta.map(|m| m.bid_set_hash).unwrap_or([0u8; 32]);
+        let bid_set_hash = meta.as_ref().map(|m| m.bid_set_hash).unwrap_or([0u8; 32]);
+        let payout_addresses = meta
+            .map(|m| m.payout_addresses)
+            .unwrap_or_default();
 
         // Derive helper peer ids from any proofs beyond the first.
         let helper_peer_ids: Vec<NodePeerId> = ack
@@ -226,6 +256,16 @@ impl EventLoop {
             .map(|p| p.node_peer_id.clone())
             .unwrap_or_else(|| NodePeerId(sender.to_string()));
 
+        // Compute per-node payout amounts from bid prices.
+        let payout_lines = payments::compute_payouts(&ack, &payout_addresses);
+        let payouts: Vec<Payout> = payout_lines
+            .iter()
+            .map(|l| Payout {
+                sui_address: l.sui_address.clone(),
+                amount_nanox: l.amount_nanox,
+            })
+            .collect();
+
         let receipt = RoutingReceipt {
             request_id: ack.request_id,
             client_id,
@@ -234,10 +274,7 @@ impl EventLoop {
             bid_set_hash,
             proof_ids: ack.proof_ids(),
             aggregated_output_hash: ack.aggregated_output_hash,
-            // Filled in by the payment-computation slice; the field is
-            // already committed to by the signature so receipts without
-            // payouts simply mean "no on-chain settlement yet".
-            payouts: Vec::new(),
+            payouts,
             timestamp_ms: now_ms,
             coordinator_pubkey: [0u8; 32],
             signature: Vec::new(),
@@ -255,6 +292,22 @@ impl EventLoop {
         }
 
         tracing::info!(request_id = %ack.request_id, "routing receipt signed and stored");
+
+        // Persist payment rows so the settlement worker can drain them.
+        if let Some(pool) = &self.pg_pool {
+            if !payout_lines.is_empty() {
+                if let Err(e) = payments::insert_pending(pool, ack.request_id, &payout_lines).await {
+                    tracing::error!(request_id = %ack.request_id, err = %e, "failed to insert payment rows");
+                } else {
+                    tracing::info!(
+                        request_id = %ack.request_id,
+                        count = payout_lines.len(),
+                        "payment rows queued"
+                    );
+                }
+            }
+        }
+
         let _ = self
             .swarm
             .behaviour_mut()
@@ -292,6 +345,11 @@ impl EventLoop {
                 let result = self.publish_request(request);
                 let _ = reply_tx.send(result);
             }
+            MeshCommand::SetPayoutAddresses { request_id, addresses } => {
+                if let Some(meta) = self.in_flight.get_mut(&request_id) {
+                    meta.payout_addresses = addresses;
+                }
+            }
             MeshCommand::Dial { addr, reply_tx } => {
                 let result = self
                     .swarm
@@ -317,14 +375,12 @@ impl EventLoop {
             .publish(topic, payload)
             .map_err(|e| anyhow::anyhow!("gossipsub publish: {e}"))?;
 
-        // Store minimal metadata so the completion handler can build
-        // the routing receipt without a DB round-trip (replaced by
-        // Apalis job records in slice 6).
         self.in_flight.insert(
             request.request_id,
             InFlightMeta {
                 client_id: String::new(),
                 bid_set_hash: [0u8; 32],
+                payout_addresses: HashMap::new(),
             },
         );
 

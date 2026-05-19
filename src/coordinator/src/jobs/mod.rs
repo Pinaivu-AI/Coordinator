@@ -4,5 +4,6 @@
 //! deadline expiry.
 
 pub mod dispatch_job;
+pub mod settlement_worker;
 pub mod store;
 pub mod worker;

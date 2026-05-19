@@ -7,6 +7,7 @@
 pub mod api;
 pub mod app;
 pub mod jobs;
+pub mod payments;
 pub mod marketplace;
 pub mod mesh;
 pub mod observability;

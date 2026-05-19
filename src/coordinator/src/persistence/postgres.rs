@@ -32,6 +32,25 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             status               TEXT    NOT NULL DEFAULT 'Dispatched',
             escrow_handle_json   TEXT    NOT NULL DEFAULT '{}'
         );
+
+        CREATE TABLE IF NOT EXISTS payments (
+            id                  UUID        PRIMARY KEY,
+            request_id          UUID        NOT NULL,
+            payee_peer_id       TEXT        NOT NULL,
+            payee_sui_address   TEXT        NOT NULL,
+            amount_nanox        BIGINT      NOT NULL,
+            status              TEXT        NOT NULL DEFAULT 'pending',
+            tx_digest           TEXT,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            submitted_at        TIMESTAMPTZ,
+            confirmed_at        TIMESTAMPTZ
+        );
+
+        CREATE INDEX IF NOT EXISTS payments_status_idx
+            ON payments (status) WHERE status = 'pending';
+
+        CREATE INDEX IF NOT EXISTS payments_request_idx
+            ON payments (request_id);
         "#,
     )
     .execute(pool)

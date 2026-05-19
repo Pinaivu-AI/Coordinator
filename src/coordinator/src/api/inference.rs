@@ -83,6 +83,18 @@ pub async fn chat_completions(
     let winner = pick_winner(&bids)
         .ok_or_else(|| AppError::NoNodes("auction closed with no bids".into()))?;
 
+    // Record peer_id → Sui payout address for every bidder so the
+    // completion handler can build payment rows without a DB round-trip.
+    let payout_addresses: std::collections::HashMap<String, String> = bids
+        .iter()
+        .filter(|b| !b.payout_address.is_empty())
+        .map(|b| (b.node_peer_id.0.clone(), b.payout_address.clone()))
+        .collect();
+    state
+        .mesh()
+        .set_payout_addresses(request_id, payout_addresses)
+        .await;
+
     let client_pubkey = decode_hex_pubkey(&req.client_pubkey_hex)?;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

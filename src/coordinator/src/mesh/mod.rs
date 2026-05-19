@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{InferenceBid, InferenceRequest};
 use crate::receipts::ReceiptArchive;
+use std::collections::HashMap;
 
 pub use completion_proto::{CompletionAck, CompletionResponse};
 pub use peer_registry::{PeerEntry, PeerRegistry};
@@ -40,6 +41,16 @@ pub trait Mesh: Send + Sync {
         &self,
         request: &InferenceRequest,
     ) -> Result<mpsc::Receiver<InferenceBid>>;
+
+    /// Called after the auction to record peer_id → Sui payout address
+    /// mappings. The event loop stores them in `in_flight` so the
+    /// completion handler can build payment rows without a DB look-up.
+    /// Default is a no-op so test meshes don't need to implement it.
+    async fn set_payout_addresses(
+        &self,
+        _request_id: uuid::Uuid,
+        _addresses: HashMap<String, String>,
+    ) {}
 }
 
 /// A mesh that never produces bids. Default for `main.rs` until the
@@ -110,6 +121,17 @@ impl Mesh for Libp2pMesh {
             .context("send publish command")?;
         rx.await.context("publish reply")?
     }
+
+    async fn set_payout_addresses(
+        &self,
+        request_id: uuid::Uuid,
+        addresses: HashMap<String, String>,
+    ) {
+        let _ = self
+            .cmd_tx
+            .send(MeshCommand::SetPayoutAddresses { request_id, addresses })
+            .await;
+    }
 }
 
 /// Handle returned by [`spawn_libp2p_mesh`]. Keep it alive for the
@@ -134,6 +156,16 @@ pub async fn spawn_libp2p_mesh(
     listen_addr: Multiaddr,
     peer_registry: Arc<PeerRegistry>,
     receipt_archive: Arc<dyn ReceiptArchive>,
+) -> Result<MeshHandle> {
+    spawn_libp2p_mesh_with_pg(enclave_key, listen_addr, peer_registry, receipt_archive, None).await
+}
+
+pub async fn spawn_libp2p_mesh_with_pg(
+    enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
+    listen_addr: Multiaddr,
+    peer_registry: Arc<PeerRegistry>,
+    receipt_archive: Arc<dyn ReceiptArchive>,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Result<MeshHandle> {
     let secret = enclave_key.secret_bytes();
     let identity = behaviour::libp2p_identity_from_ed25519_secret(&secret)?;
@@ -168,7 +200,7 @@ pub async fn spawn_libp2p_mesh(
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (ready_tx, ready_rx) = oneshot::channel();
-    let event_loop = EventLoop::new(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive);
+    let event_loop = EventLoop::with_pg(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive, pg_pool);
     let event_loop_task = tokio::spawn(event_loop.run());
 
     // Wait for the first NewListenAddr — bounded so a bad config

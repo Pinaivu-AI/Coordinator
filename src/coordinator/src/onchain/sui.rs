@@ -94,6 +94,42 @@ impl SidecarClient {
                 .unwrap_or_else(|| "<missing>".to_string()),
         })
     }
+
+    /// POST `/sui/settle` — ask the sidecar to call `vault::settle` for
+    /// one `(request_id, payee, amount)` triple. The sidecar builds the
+    /// PTB, attaches the signed receipt, and submits it.
+    /// Returns the Sui transaction digest.
+    pub async fn settle(
+        &self,
+        request_id: &str,
+        payee_sui_address: &str,
+        amount_nanox: u64,
+        receipt_b64: &str,
+    ) -> Result<String> {
+        let url = format!("{}/sui/settle", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header("X-Sidecar-Secret", &self.secret)
+            .json(&SettleReq {
+                request_id: request_id.to_string(),
+                payee_sui_address: payee_sui_address.to_string(),
+                amount_nanox,
+                receipt_b64: receipt_b64.to_string(),
+            })
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("sidecar settle returned {status}: {body}");
+        }
+        let parsed: SettleResp =
+            serde_json::from_str(&body).with_context(|| format!("decode settle body: {body}"))?;
+        Ok(parsed.tx_digest)
+    }
 }
 
 #[derive(Serialize)]
@@ -105,6 +141,19 @@ struct RegisterEnclaveReq {
 struct RegisterEnclaveResp {
     tx_digest: String,
     enclave_object_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SettleReq {
+    request_id: String,
+    payee_sui_address: String,
+    amount_nanox: u64,
+    receipt_b64: String,
+}
+
+#[derive(Deserialize)]
+struct SettleResp {
+    tx_digest: String,
 }
 
 /// Spawn a background task that registers this enclave on-chain (via
