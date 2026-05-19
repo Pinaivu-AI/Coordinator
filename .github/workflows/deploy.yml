@@ -377,45 +377,36 @@ jobs:
           rm -f /tmp/deploy_key
 
       # ── Register coordinator on Sui ───────────────────────────────────────
-      # Writes the fresh PCRs to EnclaveConfig on-chain, then polls
+      # Pushes fresh PCRs to EnclaveConfig on-chain, then polls
       # /enclave_health until enclave_object_id is non-null.
-      # All logic lives in scripts/register-coordinator.sh; this step
-      # just ships the operator credentials and runs it.
+      # All logic lives in scripts/register-coordinator.sh.
       #
-      # Secrets needed:
-      #   PINAIVU_SUI_VARS      — newline-separated KEY=VALUE with
-      #                           PINAIVU_PACKAGE_ID, PINAIVU_ENCLAVE_CONFIG_ID,
-      #                           PINAIVU_CAP_ID, SUI_NETWORK
-      #   PINAIVU_SUI_KEYSTORE  — contents of ~/.sui/sui_config/sui.keystore
+      # Prerequisites (one-time EC2 setup):
+      #   - sui CLI installed and active address set to the operator address
+      # Secret needed:
+      #   PINAIVU_SUI_VARS  — newline-separated KEY=VALUE with
+      #                       PINAIVU_PACKAGE_ID, PINAIVU_ENCLAVE_CONFIG_ID,
+      #                       PINAIVU_CAP_ID, SUI_NETWORK
       - name: Register coordinator on Sui
         env:
           EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
           EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
           EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
           PINAIVU_SUI_VARS: ${{ secrets.PINAIVU_SUI_VARS }}
-          PINAIVU_SUI_KEYSTORE: ${{ secrets.PINAIVU_SUI_KEYSTORE }}
         run: |
           echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
           SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
 
-          printf '%s' "$PINAIVU_SUI_VARS"     > /tmp/sui_vars.env
-          printf '%s' "$PINAIVU_SUI_KEYSTORE" > /tmp/sui_keystore.json
+          printf '%s' "$PINAIVU_SUI_VARS" > /tmp/sui_vars.env
           scp -o StrictHostKeyChecking=no -i /tmp/deploy_key \
-              /tmp/sui_vars.env /tmp/sui_keystore.json \
-              "$EC2_USER@$EC2_HOST:/tmp/"
-          rm -f /tmp/sui_vars.env /tmp/sui_keystore.json
+              /tmp/sui_vars.env "$EC2_USER@$EC2_HOST:/tmp/"
+          rm -f /tmp/sui_vars.env
 
           $SSH 'bash -s' << 'REMOTE'
           set -e
-          # Place operator keystore where the sui CLI expects it
-          mkdir -p ~/.sui/sui_config
-          cp /tmp/sui_keystore.json ~/.sui/sui_config/sui.keystore
-          rm -f /tmp/sui_keystore.json
-
-          # Load Sui-specific vars and run the registration script
+          sui --version
           set -a; source /tmp/sui_vars.env; set +a
           rm -f /tmp/sui_vars.env
-
           chmod +x ~/pinaivu-coordinator/scripts/register-coordinator.sh
           ~/pinaivu-coordinator/scripts/register-coordinator.sh
           REMOTE
