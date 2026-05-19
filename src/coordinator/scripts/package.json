@@ -1,0 +1,19 @@
+{
+  "name": "pinaivu-coordinator-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sidecar": "tsx sidecar-server.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "2.5.0",
+    "express": "5.1.0",
+    "tsx": "4.21.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.0",
+    "typescript": "5.6.3"
+  }
+}
