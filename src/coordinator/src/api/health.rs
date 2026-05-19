@@ -19,14 +19,20 @@ pub struct EnclaveHealthResponse {
     pub public_key_hex: String,
     pub peer_id: Option<String>,
     pub uptime_ms: u64,
+    /// Set once the background registration task completes; `null` until then.
+    pub enclave_object_id: Option<String>,
+    pub sui_tx_digest: Option<String>,
 }
 
 pub async fn enclave_health(State(state): State<AppState>) -> Json<EnclaveHealthResponse> {
     let pubkey = state.enclave_pubkey_bytes();
+    let on_chain = state.on_chain().read().await;
     Json(EnclaveHealthResponse {
         public_key_hex: hex::encode(pubkey),
         peer_id: peer_id_from_ed25519(&pubkey),
         uptime_ms: state.uptime_ms(),
+        enclave_object_id: on_chain.as_ref().map(|r| r.enclave_object_id.clone()),
+        sui_tx_digest: on_chain.as_ref().map(|r| r.tx_digest.clone()),
     })
 }
 

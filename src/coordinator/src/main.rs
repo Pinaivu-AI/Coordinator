@@ -112,11 +112,12 @@ async fn main() -> Result<()> {
     }
 
     // ── HTTP server ────────────────────────────────────────────────────────
-    let state = app::AppState::with_full_archive(
+    let state = app::AppState::with_full_archive_and_chain(
         enclave_key,
         mesh_handle.mesh.clone(),
         peer_registry,
         receipt_archive,
+        on_chain_state,
     );
 
     let (listener, local) = coordinator::bind(&cfg.bind_addr).await?;

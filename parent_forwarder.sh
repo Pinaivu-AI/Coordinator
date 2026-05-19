@@ -73,6 +73,19 @@ if [ -n "${REDIS_URL:-}" ]; then
         TCP:"${REDIS_HOST}":"${REDIS_PORT}" &
 fi
 
+# Sui RPC — sidecar (inside enclave) calls public Sui fullnode over VSOCK:8103.
+# The sidecar resolves SUI_RPC_URL to a host:port pair; this bridge forwards it.
+# Port 443 assumed for mainnet/testnet HTTPS endpoints; adjust if using a custom
+# HTTP-only node.
+if [ -n "${SUI_RPC_URL:-}" ]; then
+    SUI_HOST=$(printf '%s' "${SUI_RPC_URL}" | sed -nE 's#https?://([^/:]+).*#\1#p')
+    SUI_PORT=$(printf '%s' "${SUI_RPC_URL}" | sed -nE 's#https?://[^/:]+:?([0-9]*).*#\1#p')
+    SUI_PORT="${SUI_PORT:-443}"
+    echo "VSOCK:8103 → ${SUI_HOST}:${SUI_PORT}  (Sui RPC)"
+    socat VSOCK-LISTEN:8103,reuseaddr,fork \
+        TCP:"${SUI_HOST}":"${SUI_PORT}" &
+fi
+
 # ── Log collection ────────────────────────────────────────────────────────────
 echo "VSOCK:5000 → enclave.log  (coordinator logs)"
 socat VSOCK-LISTEN:5000,reuseaddr,fork \

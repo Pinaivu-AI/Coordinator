@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nautilus_enclave::EnclaveKeyPair;
+use tokio::sync::RwLock;
 
 use crate::mesh::{Mesh, NoopMesh, PeerRegistry};
+use crate::onchain::RegisteredEnclave;
 use crate::receipts::{InMemoryReceiptArchive, ReceiptArchive};
 
 /// How long an un-refreshed peer stays in the in-enclave registry
@@ -27,6 +29,7 @@ struct Inner {
     mesh: Arc<dyn Mesh>,
     peer_registry: Arc<PeerRegistry>,
     receipt_archive: Arc<dyn ReceiptArchive>,
+    on_chain: Arc<RwLock<Option<RegisteredEnclave>>>,
     started_at_ms: u64,
 }
 
@@ -91,6 +94,24 @@ impl AppState {
         peer_registry: Arc<PeerRegistry>,
         receipt_archive: Arc<dyn ReceiptArchive>,
     ) -> Self {
+        Self::with_full_archive_and_chain(
+            enclave_key,
+            mesh,
+            peer_registry,
+            receipt_archive,
+            Arc::new(RwLock::new(None)),
+        )
+    }
+
+    /// Full constructor used by `main.rs`; threads the on-chain
+    /// registration cell through to `/enclave_health`.
+    pub fn with_full_archive_and_chain(
+        enclave_key: Arc<EnclaveKeyPair>,
+        mesh: Arc<dyn Mesh>,
+        peer_registry: Arc<PeerRegistry>,
+        receipt_archive: Arc<dyn ReceiptArchive>,
+        on_chain: Arc<RwLock<Option<RegisteredEnclave>>>,
+    ) -> Self {
         let started_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -101,6 +122,7 @@ impl AppState {
                 mesh,
                 peer_registry,
                 receipt_archive,
+                on_chain,
                 started_at_ms,
             }),
         }
@@ -132,6 +154,10 @@ impl AppState {
 
     pub fn started_at_ms(&self) -> u64 {
         self.inner.started_at_ms
+    }
+
+    pub fn on_chain(&self) -> &Arc<RwLock<Option<RegisteredEnclave>>> {
+        &self.inner.on_chain
     }
 
     pub fn uptime_ms(&self) -> u64 {
