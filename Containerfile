@@ -33,6 +33,19 @@ FROM stagex/linux-nitro@sha256:073c4603686e3bdc0ed6755fee3203f6f6f1512e0ded09eae
 FROM stagex/user-cpio@sha256:9802cf7909c70e779ba8fe4923b0e190241c4d6ad329f3f0720c2a7f1d97cf37 AS user-cpio
 FROM stagex/user-socat@sha256:91cd7505fb97593e5790bdbb0ca62d5fd2bae0d70fda025d46871d0a36410f7d AS user-socat
 
+# ── Node 22 musl runtime (for TS sidecar) ────────────────────────────────────
+# node:22-alpine uses musl libc so the binary + its C++ runtime deps
+# (libstdc++.so.6, libgcc_s.so.1) can be dropped straight into the
+# stagex initramfs which also runs on musl.
+FROM node:22-alpine AS node-build
+RUN node --version && npm --version
+
+# ── TS sidecar npm deps ──────────────────────────────────────────────────────
+FROM node-build AS ts-build
+COPY src/coordinator/scripts /scripts
+WORKDIR /scripts
+RUN npm ci --omit=dev
+
 # ── Toolchain base (scratch + stagex layers) ─────────────────────────────────
 FROM scratch AS base
 ENV TARGET=x86_64-unknown-linux-musl
@@ -87,7 +100,9 @@ RUN mkdir -p initramfs/etc/ssl/certs \
              initramfs/etc \
              initramfs/proc initramfs/sys initramfs/dev \
              initramfs/dev/pts initramfs/dev/shm initramfs/run \
-             initramfs/tmp initramfs/sys/fs/cgroup
+             initramfs/tmp initramfs/sys/fs/cgroup \
+             initramfs/usr/local/bin initramfs/usr/local/lib \
+             initramfs/usr/lib initramfs/scripts
 
 # Kernel module and base filesystem
 COPY --from=user-linux-nitro /nsm.ko initramfs/nsm.ko
@@ -100,6 +115,15 @@ COPY --from=user-socat /bin/socat initramfs/socat
 # Enclave binaries
 RUN cp /target/x86_64-unknown-linux-musl/release/init        initramfs/init
 RUN cp /target/x86_64-unknown-linux-musl/release/coordinator initramfs/coordinator
+
+# Node runtime + TS sidecar. The Alpine node binary is musl-linked and
+# its C++ runtime (libstdc++, libgcc) is required for npm modules that
+# ship native bindings. Scripts dir has node_modules baked from `npm ci`.
+COPY --from=node-build /usr/local/bin/node         initramfs/usr/local/bin/node
+COPY --from=node-build /usr/local/lib/             initramfs/usr/local/lib/
+COPY --from=node-build /usr/lib/libstdc++.so.6     initramfs/usr/lib/libstdc++.so.6
+COPY --from=node-build /usr/lib/libgcc_s.so.1      initramfs/usr/lib/libgcc_s.so.1
+COPY --from=ts-build   /scripts                    initramfs/scripts
 
 # Build a reproducible cpio archive. Timestamps are zeroed and entries
 # are sorted so the archive is identical given the same file content.

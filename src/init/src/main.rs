@@ -130,6 +130,23 @@ fn main() {
         std::env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
     }
 
+    // ── Sidecar coordination ──────────────────────────────────────────────────
+    // Sidecar runs on loopback inside the enclave and signs Sui PTBs
+    // on the coordinator's behalf. Both processes share SIDECAR_SECRET
+    // for the authenticated HTTP hop; generate one if config didn't push
+    // a fixed value (rotates per enclave boot in that case).
+    if std::env::var("SIDECAR_URL").is_err() {
+        std::env::set_var("SIDECAR_URL", "http://127.0.0.1:8200");
+    }
+    if std::env::var("SIDECAR_SECRET").is_err() {
+        let bytes = get_entropy(32).unwrap_or_default();
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for b in &bytes {
+            hex.push_str(&format!("{:02x}", b));
+        }
+        std::env::set_var("SIDECAR_SECRET", hex);
+    }
+
     // ── VSOCK↔TCP bridges ────────────────────────────────────────────────────
     // Outbound: coordinator reaches Postgres/Redis via local TCP;
     // parent forwards the VSOCK side to the real external hosts.
@@ -144,6 +161,29 @@ fn main() {
     // Inbound: parent delivers HTTP and libp2p traffic via VSOCK.
     bridge("VSOCK-LISTEN:4000,reuseaddr,fork", "TCP:127.0.0.1:4000");
     bridge("VSOCK-LISTEN:4001,reuseaddr,fork", "TCP:127.0.0.1:4001");
+
+    // ── Spawn TS sidecar (Sui PTB signer) ─────────────────────────────────────
+    // The node binary + npm-installed scripts live at /usr/local/bin
+    // and /scripts respectively (see Containerfile). Sidecar inherits
+    // SIDECAR_SECRET, OPERATOR_PRIVATE_KEY, and Pinaivu contract IDs
+    // from the process env (populated by the VSOCK:7000 config push).
+    let sidecar_log = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/sidecar.log")
+        .expect("open sidecar log");
+    let sidecar_log2 = sidecar_log.try_clone().expect("clone sidecar log fd");
+
+    dmesg("starting sidecar".into());
+    let _sidecar = Command::new("/usr/local/bin/node")
+        .args(["/scripts/node_modules/tsx/dist/cli.mjs", "/scripts/sidecar-server.ts"])
+        .env("LD_LIBRARY_PATH", "/usr/lib:/usr/local/lib")
+        .env("NODE_PATH", "/scripts/node_modules")
+        .stdout(sidecar_log)
+        .stderr(sidecar_log2)
+        .spawn()
+        .expect("failed to spawn sidecar");
 
     // ── Spawn coordinator ─────────────────────────────────────────────────────
     // Redirect both streams to a temp file so we can tail it to the parent.
