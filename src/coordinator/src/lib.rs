@@ -10,6 +10,7 @@ pub mod jobs;
 pub mod marketplace;
 pub mod mesh;
 pub mod observability;
+pub mod onchain;
 pub mod persistence;
 pub mod receipts;
 pub mod reputation;

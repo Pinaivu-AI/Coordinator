@@ -10,16 +10,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use coordinator::{
     app,
     jobs::{store::PgJobStore, worker::spawn_dispatch_worker},
     mesh::{spawn_libp2p_mesh, PeerRegistry},
     observability,
+    onchain::{spawn_registration, RegisteredEnclave, SidecarClient},
     persistence::{postgres as pg, redis as r},
     receipts::PostgresReceiptArchive,
     settlement::{free::FreeSettlement, SettlementAdapter},
 };
 use nautilus_enclave::EnclaveKeyPair;
+use tokio::sync::RwLock;
 
 /// How long the in-enclave peer registry holds entries between
 /// gossip announcements before eviction.
@@ -81,6 +84,31 @@ async fn main() -> Result<()> {
     .await?;
     for addr in &mesh_handle.listen_addrs {
         tracing::info!(libp2p_addr = %addr, "mesh listening");
+    }
+
+    // ── On-chain registration via the colocated sidecar ───────────────────
+    // Asks the TS sidecar to register this enclave on Sui so any
+    // receipts we sign will verify under pinaivu::enclave. Warning-on-
+    // fail with background retry; inference doesn't depend on this
+    // (payouts will fail to settle on-chain until registration lands).
+    let on_chain_state = Arc::new(RwLock::new(None::<RegisteredEnclave>));
+    match SidecarClient::from_env() {
+        Ok(sidecar) => {
+            let pubkey = enclave_key.public_key_bytes();
+            match nautilus_enclave::get_attestation(&pubkey, &[]) {
+                Ok(doc) => {
+                    if let Ok(att_bytes) = hex::decode(&doc.raw_cbor_hex) {
+                        let att_b64 = base64::engine::general_purpose::STANDARD
+                            .encode(&att_bytes);
+                        spawn_registration(sidecar, att_b64, on_chain_state.clone());
+                    } else {
+                        tracing::warn!("attestation raw_cbor_hex is not valid hex; skipping registration");
+                    }
+                }
+                Err(e) => tracing::warn!(?e, "NSM attestation failed; skipping registration"),
+            }
+        }
+        Err(e) => tracing::warn!(?e, "sidecar client unavailable; skipping registration"),
     }
 
     // ── HTTP server ────────────────────────────────────────────────────────

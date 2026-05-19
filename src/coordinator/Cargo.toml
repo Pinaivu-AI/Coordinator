@@ -90,6 +90,12 @@ apalis-sql = { version = "0.7", features = ["postgres"] }
 nautilus-enclave = { path = "../nautilus-enclave" }
 pinaivu-protocol = { path = "../pinaivu-protocol" }
 
+# Used by onchain::sui::SidecarClient to call the colocated TS sidecar
+# over loopback HTTP (POST /sui/register-enclave etc.). rustls so we
+# avoid a native OpenSSL dep inside the musl-static enclave build.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+
 [dev-dependencies]
 tempfile = "3"
 rand = "0.8"
