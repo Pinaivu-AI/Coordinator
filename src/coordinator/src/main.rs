@@ -14,7 +14,7 @@ use base64::Engine;
 use coordinator::{
     app,
     jobs::{store::PgJobStore, worker::spawn_dispatch_worker},
-    mesh::{spawn_libp2p_mesh_with_pg, PeerRegistry},
+    mesh::{spawn_libp2p_mesh_full, PeerRegistry},
     observability,
     onchain::{spawn_registration, RegisteredEnclave, SidecarClient},
     persistence::{postgres as pg, redis as r},
@@ -67,20 +67,38 @@ async fn main() -> Result<()> {
     // ── Settlement worker ──────────────────────────────────────────────────
     // Drains `pending` payment rows and submits vault::settle PTBs via
     // the in-enclave sidecar. Only spawned when the sidecar is reachable.
-    let _settlement_worker_handle = match SidecarClient::from_env() {
-        Ok(sidecar) => {
-            use apalis_sql::postgres::PostgresStorage;
-            use coordinator::jobs::settlement_worker::{spawn_settlement_worker, SettlementJob};
-            let storage = PostgresStorage::<SettlementJob>::new(pg_pool.clone());
-            let handle = spawn_settlement_worker(pg_pool.clone(), Arc::new(sidecar), storage);
-            tracing::info!("apalis settlement worker spawned");
-            Some(handle)
-        }
-        Err(_) => {
-            tracing::warn!("sidecar unavailable — settlement worker not started");
-            None
-        }
-    };
+    // `settlement_tx` is passed into the mesh event loop so it can trigger
+    // the worker immediately after inserting payment rows.
+    let settlement_tx: Option<tokio::sync::mpsc::Sender<coordinator::jobs::settlement_worker::SettlementJob>> =
+        match SidecarClient::from_env() {
+            Ok(sidecar) => {
+                use apalis::prelude::Storage;
+                use apalis_sql::postgres::PostgresStorage;
+                use coordinator::jobs::settlement_worker::{spawn_settlement_worker, SettlementJob};
+                let storage = PostgresStorage::<SettlementJob>::new(pg_pool.clone());
+                let handle = spawn_settlement_worker(pg_pool.clone(), Arc::new(sidecar), storage.clone());
+                tracing::info!("apalis settlement worker spawned");
+                let _worker_handle = handle;
+
+                // Channel bridges the event loop (which can't hold apalis storage directly)
+                // to a background task that pushes jobs into the apalis Postgres queue.
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<SettlementJob>(64);
+                let mut push_storage = storage;
+                tokio::spawn(async move {
+                    while let Some(job) = rx.recv().await {
+                        let req = apalis::prelude::Request::new(job);
+                        if let Err(e) = push_storage.push_request(req).await {
+                            tracing::error!(err = %e, "failed to enqueue settlement job");
+                        }
+                    }
+                });
+                Some(tx)
+            }
+            Err(_) => {
+                tracing::warn!("sidecar unavailable — settlement worker not started");
+                None
+            }
+        };
 
     // ── Receipt archive ────────────────────────────────────────────────────
     let receipt_archive: Arc<dyn coordinator::receipts::ReceiptArchive> =
@@ -93,12 +111,13 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("PINAIVU_LIBP2P_LISTEN must be a multiaddr: {e}"))?;
 
-    let mesh_handle = spawn_libp2p_mesh_with_pg(
+    let mesh_handle = spawn_libp2p_mesh_full(
         enclave_key.clone(),
         listen_addr,
         peer_registry.clone(),
         receipt_archive.clone(),
         Some(pg_pool.clone()),
+        settlement_tx,
     )
     .await?;
     for addr in &mesh_handle.listen_addrs {

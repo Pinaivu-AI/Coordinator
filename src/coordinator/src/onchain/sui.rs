@@ -87,35 +87,60 @@ impl SidecarClient {
         }
         let parsed: RegisterEnclaveResp =
             serde_json::from_str(&body).with_context(|| format!("decode body: {body}"))?;
+        let enclave_object_id = parsed
+            .enclave_object_id
+            .unwrap_or_else(|| "<missing>".to_string());
+
+        // Tell the sidecar which Enclave object to use for vault::settle calls.
+        if enclave_object_id != "<missing>" {
+            let set_url = format!("{}/sui/set-enclave-id", self.base_url);
+            let _ = self
+                .http
+                .put(&set_url)
+                .header("X-Sidecar-Secret", &self.secret)
+                .json(&serde_json::json!({ "enclave_object_id": enclave_object_id }))
+                .send()
+                .await;
+        }
+
         Ok(RegisteredEnclave {
             tx_digest: parsed.tx_digest,
-            enclave_object_id: parsed
-                .enclave_object_id
-                .unwrap_or_else(|| "<missing>".to_string()),
+            enclave_object_id,
         })
     }
 
     /// POST `/sui/settle` — ask the sidecar to call `vault::settle` for
-    /// one `(request_id, payee, amount)` triple. The sidecar builds the
-    /// PTB, attaches the signed receipt, and submits it.
+    /// one payee in this receipt. Passes all fields the Move function
+    /// needs individually so the sidecar doesn't need to parse BCS.
     /// Returns the Sui transaction digest.
     pub async fn settle(
         &self,
-        request_id: &str,
+        receipt: &pinaivu_protocol::routing_receipt::RoutingReceipt,
         payee_sui_address: &str,
         amount_nanox: u64,
-        receipt_b64: &str,
     ) -> Result<String> {
+        let payouts: Vec<PayoutJson> = receipt
+            .payouts
+            .iter()
+            .map(|p| PayoutJson {
+                sui_address: p.sui_address.clone(),
+                amount_nanox: p.amount_nanox,
+            })
+            .collect();
+
         let url = format!("{}/sui/settle", self.base_url);
         let resp = self
             .http
             .post(&url)
             .header("X-Sidecar-Secret", &self.secret)
             .json(&SettleReq {
-                request_id: request_id.to_string(),
+                request_id: receipt.request_id.to_string(),
                 payee_sui_address: payee_sui_address.to_string(),
                 amount_nanox,
-                receipt_b64: receipt_b64.to_string(),
+                timestamp_ms: receipt.timestamp_ms,
+                aggregated_output_hash: hex::encode(receipt.aggregated_output_hash),
+                payouts,
+                signature: hex::encode(&receipt.signature),
             })
             .send()
             .await
@@ -148,7 +173,16 @@ struct SettleReq {
     request_id: String,
     payee_sui_address: String,
     amount_nanox: u64,
-    receipt_b64: String,
+    timestamp_ms: u64,
+    aggregated_output_hash: String,
+    payouts: Vec<PayoutJson>,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct PayoutJson {
+    sui_address: String,
+    amount_nanox: u64,
 }
 
 #[derive(Deserialize)]

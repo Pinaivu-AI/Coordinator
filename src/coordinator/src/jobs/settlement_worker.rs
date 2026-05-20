@@ -15,15 +15,17 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pinaivu_protocol::routing_receipt::RoutingReceipt;
+
 use crate::onchain::SidecarClient;
 use crate::payments;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettlementJob {
     pub request_id: Uuid,
-    /// BCS+base64 encoded signed routing receipt — pre-computed by the
+    /// JSON-serialized signed `RoutingReceipt` — pre-computed by the
     /// completion handler so this worker doesn't need the enclave key.
-    pub receipt_b64: String,
+    pub receipt_json: String,
 }
 
 pub async fn handle_settlement(
@@ -40,14 +42,12 @@ pub async fn handle_settlement(
         return Ok(());
     }
 
+    let receipt: RoutingReceipt = serde_json::from_str(&job.receipt_json)
+        .map_err(|e| anyhow_err(anyhow::anyhow!("deserialize receipt: {e}")))?;
+
     for row in rows {
         match sidecar
-            .settle(
-                &job.request_id.to_string(),
-                &row.payee_sui_address,
-                row.amount_nanox as u64,
-                &job.receipt_b64,
-            )
+            .settle(&receipt, &row.payee_sui_address, row.amount_nanox as u64)
             .await
         {
             Ok(digest) => {

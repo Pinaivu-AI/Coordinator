@@ -26,6 +26,7 @@ use super::behaviour::{PinaivuBehaviour, PinaivuBehaviourEvent};
 use super::completion_proto::{CompletionAck, CompletionResponse};
 use super::peer_registry::PeerRegistry;
 use super::topics::{ANNOUNCE, BIDS, INFERENCE_ANY, REPUTATION};
+use crate::jobs::settlement_worker::SettlementJob;
 use crate::payments;
 use crate::protocol::{
     InferenceBid, InferenceRequest, NodeCapabilities, NodePeerId, Payout, RoutingReceipt,
@@ -76,6 +77,9 @@ pub struct EventLoop {
     /// Postgres pool for inserting payment rows after CompletionAck.
     /// `None` when running in dev/test without Postgres.
     pg_pool: Option<sqlx::PgPool>,
+    /// Channel to enqueue a `SettlementJob` after payment rows are inserted.
+    /// `None` when the settlement worker is disabled (no sidecar).
+    settlement_tx: Option<mpsc::Sender<SettlementJob>>,
     /// Per-request metadata keyed by request_id. Populated on publish,
     /// consumed on completion-ack.
     in_flight: HashMap<Uuid, InFlightMeta>,
@@ -104,6 +108,19 @@ impl EventLoop {
         receipt_archive: Arc<dyn ReceiptArchive>,
         pg_pool: Option<sqlx::PgPool>,
     ) -> Self {
+        Self::with_pg_and_settlement(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive, pg_pool, None)
+    }
+
+    pub fn with_pg_and_settlement(
+        swarm: Swarm<PinaivuBehaviour>,
+        cmd_rx: mpsc::Receiver<MeshCommand>,
+        peer_registry: Arc<PeerRegistry>,
+        ready_tx: oneshot::Sender<()>,
+        enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
+        receipt_archive: Arc<dyn ReceiptArchive>,
+        pg_pool: Option<sqlx::PgPool>,
+        settlement_tx: Option<mpsc::Sender<SettlementJob>>,
+    ) -> Self {
         Self {
             swarm,
             cmd_rx,
@@ -112,6 +129,7 @@ impl EventLoop {
             enclave_key,
             receipt_archive,
             pg_pool,
+            settlement_tx,
             in_flight: HashMap::new(),
             listen_addrs: Vec::new(),
             ready_tx: Some(ready_tx),
@@ -293,7 +311,7 @@ impl EventLoop {
 
         tracing::info!(request_id = %ack.request_id, "routing receipt signed and stored");
 
-        // Persist payment rows so the settlement worker can drain them.
+        // Persist payment rows and enqueue a settlement job.
         if let Some(pool) = &self.pg_pool {
             if !payout_lines.is_empty() {
                 if let Err(e) = payments::insert_pending(pool, ack.request_id, &payout_lines).await {
@@ -304,6 +322,14 @@ impl EventLoop {
                         count = payout_lines.len(),
                         "payment rows queued"
                     );
+                    if let Some(tx) = &self.settlement_tx {
+                        let receipt_json = serde_json::to_string(&receipt)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let job = SettlementJob { request_id: ack.request_id, receipt_json };
+                        if let Err(e) = tx.try_send(job) {
+                            tracing::warn!(request_id = %ack.request_id, err = %e, "settlement job channel full — will retry on next poll");
+                        }
+                    }
                 }
             }
         }

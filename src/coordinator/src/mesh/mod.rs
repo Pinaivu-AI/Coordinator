@@ -167,6 +167,17 @@ pub async fn spawn_libp2p_mesh_with_pg(
     receipt_archive: Arc<dyn ReceiptArchive>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Result<MeshHandle> {
+    spawn_libp2p_mesh_full(enclave_key, listen_addr, peer_registry, receipt_archive, pg_pool, None).await
+}
+
+pub async fn spawn_libp2p_mesh_full(
+    enclave_key: Arc<nautilus_enclave::EnclaveKeyPair>,
+    listen_addr: Multiaddr,
+    peer_registry: Arc<PeerRegistry>,
+    receipt_archive: Arc<dyn ReceiptArchive>,
+    pg_pool: Option<sqlx::PgPool>,
+    settlement_tx: Option<tokio::sync::mpsc::Sender<crate::jobs::settlement_worker::SettlementJob>>,
+) -> Result<MeshHandle> {
     let secret = enclave_key.secret_bytes();
     let identity = behaviour::libp2p_identity_from_ed25519_secret(&secret)?;
 
@@ -200,7 +211,7 @@ pub async fn spawn_libp2p_mesh_with_pg(
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (ready_tx, ready_rx) = oneshot::channel();
-    let event_loop = EventLoop::with_pg(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive, pg_pool);
+    let event_loop = EventLoop::with_pg_and_settlement(swarm, cmd_rx, peer_registry, ready_tx, enclave_key, receipt_archive, pg_pool, settlement_tx);
     let event_loop_task = tokio::spawn(event_loop.run());
 
     // Wait for the first NewListenAddr — bounded so a bad config

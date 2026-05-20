@@ -62,6 +62,10 @@ console.log(`[sidecar] operator address: ${operatorAddress}`);
 
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC_URL, network: NETWORK });
 
+// Active Enclave<PinaivuCoordinator> object ID — set by the coordinator
+// after a successful register_enclave call. Required by vault::settle.
+let activeEnclaveObjectId: string = "";
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
@@ -87,6 +91,17 @@ app.get("/health", (_req: Request, res: Response) => {
         operator: operatorAddress,
         network: NETWORK,
     });
+});
+
+// ── /sui/set-enclave-id ──────────────────────────────────────────────────
+// Called by the coordinator after a successful register_enclave to tell
+// the sidecar which Enclave shared object to pass to vault::settle.
+app.put("/sui/set-enclave-id", (req: Request, res: Response) => {
+    const id = (req.body?.enclave_object_id || "").trim();
+    if (!id) return res.status(400).json({ error: "enclave_object_id required" });
+    activeEnclaveObjectId = id;
+    console.log(`[sidecar] active enclave object id set: ${id}`);
+    res.json({ ok: true });
 });
 
 // ── /sui/register-enclave ────────────────────────────────────────────────
@@ -163,11 +178,19 @@ app.post("/sui/register-enclave", async (req: Request, res: Response) => {
 // The receipt_b64 field is the BCS+base64 encoded signed RoutingReceipt
 // already produced by the coordinator; the sidecar passes it straight
 // through to the on-chain verify_completion_receipt call.
+const PayoutSchema = z.object({
+    sui_address: z.string(),
+    amount_nanox: z.number().int().nonnegative(),
+});
+
 const SettleSchema = z.object({
     request_id: z.string(),
     payee_sui_address: z.string(),
     amount_nanox: z.number().int().positive(),
-    receipt_b64: z.string(),
+    timestamp_ms: z.number().int().nonnegative(),
+    aggregated_output_hash: z.string(),  // hex
+    payouts: z.array(PayoutSchema),
+    signature: z.string(),              // hex
 });
 
 const PINAIVU_VAULT_ID = (process.env.PINAIVU_VAULT_ID || "").trim();
@@ -180,23 +203,54 @@ app.post("/sui/settle", async (req: Request, res: Response) => {
     if (!PINAIVU_PACKAGE_ID || !PINAIVU_VAULT_ID) {
         return res.status(503).json({ error: "PINAIVU_PACKAGE_ID or PINAIVU_VAULT_ID not configured" });
     }
+    if (!activeEnclaveObjectId) {
+        return res.status(503).json({ error: "enclave not yet registered — call /sui/set-enclave-id first" });
+    }
 
-    const { request_id, payee_sui_address, amount_nanox, receipt_b64 } = parsed.data;
+    const { request_id, payee_sui_address, amount_nanox, timestamp_ms, aggregated_output_hash, payouts, signature } = parsed.data;
 
     try {
         const tx = new Transaction();
-        const receiptBytes = Buffer.from(receipt_b64, "base64");
+
+        // Encode payouts as BCS vector<Payout> matching Move struct layout:
+        // each Payout = { sui_address: address (32 bytes), amount: u64 }
+        // We pass it as a raw BCS-encoded vector using pure.vector("u8", bytes).
+        // Build the BCS manually: u64 length prefix (ULEB128) + entries.
+        function encodeBcsU64(n: bigint): Uint8Array {
+            const buf = new Uint8Array(8);
+            for (let i = 0; i < 8; i++) { buf[i] = Number((n >> BigInt(8 * i)) & 0xffn); }
+            return buf;
+        }
+        function encodeUleb128(n: number): Uint8Array {
+            const bytes: number[] = [];
+            do { let byte = n & 0x7f; n >>= 7; if (n > 0) byte |= 0x80; bytes.push(byte); } while (n > 0);
+            return new Uint8Array(bytes);
+        }
+        function padSuiAddress(addr: string): Uint8Array {
+            const hex = addr.replace(/^0x/, "").padStart(64, "0");
+            return new Uint8Array(Buffer.from(hex, "hex"));
+        }
+
+        const payoutChunks: Uint8Array[] = [encodeUleb128(payouts.length)];
+        for (const p of payouts) {
+            payoutChunks.push(padSuiAddress(p.sui_address));
+            payoutChunks.push(encodeBcsU64(BigInt(p.amount_nanox)));
+        }
+        const payoutsBcs = Buffer.concat(payoutChunks as Buffer[]);
 
         tx.moveCall({
             target: `${PINAIVU_PACKAGE_ID}::vault::settle`,
             typeArguments: ["0x2::sui::SUI"],
             arguments: [
                 tx.object(PINAIVU_VAULT_ID),
-                tx.object(PINAIVU_ENCLAVE_CONFIG_ID),
+                tx.object(activeEnclaveObjectId),
                 tx.pure.vector("u8", Array.from(Buffer.from(request_id))),
                 tx.pure.address(payee_sui_address),
                 tx.pure.u64(amount_nanox),
-                tx.pure.vector("u8", Array.from(receiptBytes)),
+                tx.pure.u64(timestamp_ms),
+                tx.pure.vector("u8", Array.from(Buffer.from(aggregated_output_hash, "hex"))),
+                tx.pure.vector("u8", Array.from(payoutsBcs)),
+                tx.pure.vector("u8", Array.from(Buffer.from(signature, "hex"))),
             ],
         });
 
