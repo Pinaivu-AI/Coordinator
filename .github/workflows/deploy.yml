@@ -261,7 +261,7 @@ jobs:
             PG_PORT=$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@[^:]+:([0-9]+).*#\1#p')
             PG_PORT="${PG_PORT:-5432}"
           fi
-          printf '[Unit]\nDescription=Pinaivu outbound Postgres (VSOCK:8101 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8101,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
+          printf '[Unit]\nDescription=Pinaivu outbound Postgres (VSOCK:8101 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8101,fork,reuseaddr TCP4:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
             "$PG_HOST" "$PG_PORT" "$PG_HOST" "$PG_PORT" \
             | sudo tee /etc/systemd/system/pinaivu-outbound-postgres.service > /dev/null
 
@@ -275,7 +275,7 @@ jobs:
             REDIS_PORT=$(printf '%s' "$REDIS_URL" | sed -nE 's#.*@[^:]+:([0-9]+).*#\1#p')
             REDIS_PORT="${REDIS_PORT:-6379}"
           fi
-          printf '[Unit]\nDescription=Pinaivu outbound Redis (VSOCK:8102 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8102,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
+          printf '[Unit]\nDescription=Pinaivu outbound Redis (VSOCK:8102 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8102,fork,reuseaddr TCP4:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
             "$REDIS_HOST" "$REDIS_PORT" "$REDIS_HOST" "$REDIS_PORT" \
             | sudo tee /etc/systemd/system/pinaivu-outbound-redis.service > /dev/null
 
@@ -285,7 +285,7 @@ jobs:
           SUI_HOST=$(printf '%s' "$SUI_RPC_URL" | sed -nE 's#https?://([^/:]+).*#\1#p')
           SUI_PORT=$(printf '%s' "$SUI_RPC_URL" | sed -nE 's#https?://[^/:]+:?([0-9]*).*#\1#p')
           SUI_PORT="${SUI_PORT:-443}"
-          printf '[Unit]\nDescription=Pinaivu outbound Sui RPC (VSOCK:8103 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8103,fork,reuseaddr TCP:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
+          printf '[Unit]\nDescription=Pinaivu outbound Sui RPC (VSOCK:8103 -> %s:%s)\nAfter=network.target\n[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8103,fork,reuseaddr TCP4:%s:%s\nRestart=always\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n' \
             "$SUI_HOST" "$SUI_PORT" "$SUI_HOST" "$SUI_PORT" \
             | sudo tee /etc/systemd/system/pinaivu-outbound-sui.service > /dev/null
 
