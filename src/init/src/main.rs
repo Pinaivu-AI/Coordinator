@@ -204,9 +204,19 @@ fn main() {
     // and /scripts respectively (see Containerfile). Sidecar inherits
     // SIDECAR_SECRET, OPERATOR_PRIVATE_KEY, and Pinaivu contract IDs
     // from the process env (populated by the VSOCK:7000 config push).
-    // Write sidecar output to the same file the VSOCK log relay tails,
-    // so its lines reach the host alongside the coordinator's. Without
-    // this the sidecar's diagnostics are invisible from outside the enclave.
+    // Sidecar + coordinator share /tmp/coordinator.log so the existing
+    // VSOCK:5000 relay surfaces both. Both processes MUST open the file
+    // in O_APPEND mode — otherwise the second writer (without O_APPEND)
+    // races against the first and silently overwrites its bytes, which
+    // is why earlier logs ended abruptly at random offsets.
+    //
+    // Truncate once here so each enclave boot starts with a clean log.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/coordinator.log");
+
     let sidecar_log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -225,11 +235,11 @@ fn main() {
         .expect("failed to spawn sidecar");
 
     // ── Spawn coordinator ─────────────────────────────────────────────────────
-    // Redirect both streams to a temp file so we can tail it to the parent.
+    // Same log file as the sidecar; open with O_APPEND so atomic writes
+    // from both processes interleave cleanly instead of racing.
     let log = OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
+        .append(true)
         .open("/tmp/coordinator.log")
         .expect("open coordinator log");
     let log2 = log.try_clone().expect("clone log fd");
