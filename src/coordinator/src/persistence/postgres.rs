@@ -31,29 +31,25 @@ pub async fn connect(database_url: &str) -> Result<PgPool> {
 
 /// Run coordinator DDL migrations inline. Idempotent (`IF NOT EXISTS`).
 async fn run_migrations(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS routing_receipts (
+    let statements: &[&str] = &[
+        r#"CREATE TABLE IF NOT EXISTS routing_receipts (
             request_id      UUID PRIMARY KEY,
             receipt_json    JSONB        NOT NULL,
             stored_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-            walrus_blob_id  TEXT
-        );
-
-        -- Add walrus_blob_id to existing deployments that predate this column.
-        ALTER TABLE routing_receipts ADD COLUMN IF NOT EXISTS walrus_blob_id TEXT;
-        ALTER TABLE routing_receipts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-
-        CREATE TABLE IF NOT EXISTS dispatch_jobs (
+            walrus_blob_id  TEXT,
+            created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        )"#,
+        "ALTER TABLE routing_receipts ADD COLUMN IF NOT EXISTS walrus_blob_id TEXT",
+        "ALTER TABLE routing_receipts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        r#"CREATE TABLE IF NOT EXISTS dispatch_jobs (
             request_id           UUID    PRIMARY KEY,
             primary_peer_id      TEXT    NOT NULL,
             dispatched_at_ms     BIGINT  NOT NULL,
             deadline_ms          BIGINT  NOT NULL,
             status               TEXT    NOT NULL DEFAULT 'Dispatched',
             escrow_handle_json   TEXT    NOT NULL DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS payments (
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS payments (
             id                  UUID        PRIMARY KEY,
             request_id          UUID        NOT NULL,
             payee_peer_id       TEXT        NOT NULL,
@@ -64,17 +60,14 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             submitted_at        TIMESTAMPTZ,
             confirmed_at        TIMESTAMPTZ
-        );
+        )"#,
+        "CREATE INDEX IF NOT EXISTS payments_status_idx ON payments (status) WHERE status = 'pending'",
+        "CREATE INDEX IF NOT EXISTS payments_request_idx ON payments (request_id)",
+    ];
 
-        CREATE INDEX IF NOT EXISTS payments_status_idx
-            ON payments (status) WHERE status = 'pending';
-
-        CREATE INDEX IF NOT EXISTS payments_request_idx
-            ON payments (request_id);
-        "#,
-    )
-    .execute(pool)
-    .await?;
+    for stmt in statements {
+        sqlx::query(stmt).execute(pool).await?;
+    }
 
     Ok(())
 }
