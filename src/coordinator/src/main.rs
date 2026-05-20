@@ -29,28 +29,45 @@ use tokio::sync::RwLock;
 const PEER_TTL: Duration = Duration::from_secs(600);
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    match run().await {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("FATAL: coordinator exited with error: {e:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<()> {
+    eprintln!("CHK 01 main entered");
     observability::init();
+    eprintln!("CHK 02 observability init");
 
     let cfg = app::Config::from_env()?;
+    eprintln!(
+        "CHK 03 config loaded: database_url_len={} redis_url_len={}",
+        cfg.database_url.len(),
+        cfg.redis_url.len()
+    );
 
-    // Single source of truth for the coordinator's cryptographic
-    // identity. Same key seeds the libp2p PeerId, signs HTTP
-    // responses, and signs routing receipts + dispatch tokens.
     let enclave_key = Arc::new(EnclaveKeyPair::generate());
     tracing::info!(
         coordinator_pubkey = %hex::encode(enclave_key.public_key_bytes()),
         "enclave key generated"
     );
+    eprintln!("CHK 04 enclave key generated");
 
-    // ── Postgres: receipts + dispatch jobs + (later) payments ──────────────
+    eprintln!("CHK 05 connecting postgres…");
     let pg_pool = pg::connect(&cfg.database_url)
         .await
         .context("connect postgres")?;
+    eprintln!("CHK 06 postgres connected");
     tracing::info!("postgres connected; migrations applied");
 
-    // ── Redis: replay nonces + hot caches ──────────────────────────────────
+    eprintln!("CHK 07 connecting redis…");
     let _redis = r::connect(&cfg.redis_url).await.context("connect redis")?;
+    eprintln!("CHK 08 redis connected");
     tracing::info!("redis connected (PONG)");
 
     // ── Apalis deadline-watcher worker ─────────────────────────────────────
