@@ -207,8 +207,9 @@ pub fn spawn_registration(
         }
         tracing::info!("sidecar /health ok, registering enclave on-chain");
 
+        const MAX_ATTEMPTS: u32 = 5;
         let mut backoff = Duration::from_secs(2);
-        loop {
+        for attempt in 1..=MAX_ATTEMPTS {
             match sidecar.register_enclave(&attestation_b64).await {
                 Ok(reg) => {
                     tracing::info!(
@@ -220,7 +221,21 @@ pub fn spawn_registration(
                     return;
                 }
                 Err(e) => {
-                    tracing::warn!(?e, "register-enclave failed, retrying after {:?}", backoff);
+                    tracing::warn!(
+                        ?e,
+                        attempt,
+                        max = MAX_ATTEMPTS,
+                        "register-enclave failed, retrying after {:?}",
+                        backoff,
+                    );
+                    if attempt == MAX_ATTEMPTS {
+                        tracing::error!(
+                            ?e,
+                            "register-enclave gave up after {MAX_ATTEMPTS} attempts; \
+                             /enclave_health will keep enclave_object_id=null"
+                        );
+                        return;
+                    }
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(60));
                 }

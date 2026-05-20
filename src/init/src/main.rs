@@ -147,6 +147,17 @@ fn main() {
                 }
             }
         }
+        // Sidecar reaches Sui RPC by hostname — pull it out of SUI_RPC_URL
+        // so we don't need a second env var.
+        if let Ok(url) = std::env::var("SUI_RPC_URL") {
+            if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+                let host = rest.split('/').next().unwrap_or("").split(':').next().unwrap_or("");
+                if !host.is_empty() {
+                    hosts.push_str(&format!("127.0.0.1 {host}\n"));
+                    dmesg(format!("/etc/hosts: 127.0.0.1 -> {host}"));
+                }
+            }
+        }
         let _ = std::fs::write("/etc/hosts", hosts);
     }
 
@@ -177,6 +188,12 @@ fn main() {
     bridge(
         "TCP-LISTEN:6379,reuseaddr,fork",
         &format!("VSOCK-CONNECT:{PARENT_CID}:8102"),
+    );
+    // Sui RPC: sidecar dials https://<SUI_RPC_URL host>:443 → /etc/hosts maps
+    // that to 127.0.0.1 → this bridge → VSOCK:8103 → parent → real Sui.
+    bridge(
+        "TCP-LISTEN:443,reuseaddr,fork",
+        &format!("VSOCK-CONNECT:{PARENT_CID}:8103"),
     );
     // Inbound: parent delivers HTTP and libp2p traffic via VSOCK.
     bridge("VSOCK-LISTEN:4000,reuseaddr,fork", "TCP:127.0.0.1:4000");
