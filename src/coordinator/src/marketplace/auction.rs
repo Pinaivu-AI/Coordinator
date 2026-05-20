@@ -50,23 +50,9 @@ pub fn score_bid(bid: &InferenceBid) -> f32 {
     WEIGHT_PRICE * inv_price + WEIGHT_LATENCY * inv_latency + WEIGHT_REPUTATION * bid.reputation
 }
 
-/// Pick the highest-scoring bid from those compatible with the client's
-/// accepted settlement list. If `accepted` is empty, all bids qualify.
-/// Ties break on lowest price, then lowest latency.
+/// Pick the highest-scoring bid. Ties break on lowest price, then lowest latency.
 pub fn pick_winner(bids: &[InferenceBid]) -> Option<&InferenceBid> {
-    pick_winner_for(bids, &[])
-}
-
-pub fn pick_winner_for<'a>(
-    bids: &'a [InferenceBid],
-    accepted_settlements: &[String],
-) -> Option<&'a InferenceBid> {
-    let eligible = bids.iter().filter(|b| {
-        accepted_settlements.is_empty()
-            || accepted_settlements.iter().any(|s| s == &b.settlement_id)
-    });
-
-    eligible.max_by(|a, b| {
+    bids.iter().max_by(|a, b| {
         let sa = score_bid(a);
         let sb = score_bid(b);
         match sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal) {
@@ -88,10 +74,6 @@ mod tests {
     use uuid::Uuid;
 
     fn bid(peer: &str, price: u64, latency: u32, reputation: f32) -> InferenceBid {
-        bid_with_settlement(peer, price, latency, reputation, "free")
-    }
-
-    fn bid_with_settlement(peer: &str, price: u64, latency: u32, reputation: f32, settlement: &str) -> InferenceBid {
         InferenceBid {
             request_id: Uuid::nil(),
             node_peer_id: NodePeerId(peer.into()),
@@ -100,7 +82,6 @@ mod tests {
             reputation,
             http_endpoint: format!("http://node-{peer}.test"),
             payout_address: format!("0x{:0>62}", peer),
-            settlement_id: settlement.to_string(),
         }
     }
 
@@ -131,34 +112,6 @@ mod tests {
         let bids = vec![a, b];
         let w = pick_winner(&bids).unwrap();
         assert_eq!(w.node_peer_id.0, "B");
-    }
-
-    #[test]
-    fn settlement_filter_excludes_incompatible_bids() {
-        let bids = vec![
-            bid_with_settlement("A", 50, 300, 0.9, "free"),
-            bid_with_settlement("B", 10, 100, 1.0, "sui"),
-        ];
-        // Client only accepts "free" — B (best score) must be excluded.
-        let w = pick_winner_for(&bids, &["free".to_string()]).unwrap();
-        assert_eq!(w.node_peer_id.0, "A");
-    }
-
-    #[test]
-    fn empty_accepted_settlements_accepts_all() {
-        let bids = vec![
-            bid_with_settlement("A", 50, 300, 0.9, "free"),
-            bid_with_settlement("B", 10, 100, 1.0, "sui"),
-        ];
-        // Empty accepted list → B wins on score.
-        let w = pick_winner_for(&bids, &[]).unwrap();
-        assert_eq!(w.node_peer_id.0, "B");
-    }
-
-    #[test]
-    fn no_matching_settlement_returns_none() {
-        let bids = vec![bid_with_settlement("A", 50, 300, 0.9, "sui")];
-        assert!(pick_winner_for(&bids, &["free".to_string()]).is_none());
     }
 
     #[tokio::test]
