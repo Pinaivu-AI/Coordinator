@@ -204,11 +204,13 @@ fn main() {
     // and /scripts respectively (see Containerfile). Sidecar inherits
     // SIDECAR_SECRET, OPERATOR_PRIVATE_KEY, and Pinaivu contract IDs
     // from the process env (populated by the VSOCK:7000 config push).
+    // Write sidecar output to the same file the VSOCK log relay tails,
+    // so its lines reach the host alongside the coordinator's. Without
+    // this the sidecar's diagnostics are invisible from outside the enclave.
     let sidecar_log = OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
-        .open("/tmp/sidecar.log")
+        .append(true)
+        .open("/tmp/coordinator.log")
         .expect("open sidecar log");
     let sidecar_log2 = sidecar_log.try_clone().expect("clone sidecar log fd");
 
