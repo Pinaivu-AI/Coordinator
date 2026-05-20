@@ -8,10 +8,25 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 /// Connect to Postgres and ensure all coordinator tables exist.
+///
+/// Retries for up to 30 seconds to tolerate the VSOCK socat bridge
+/// needing a moment to start listening after enclave boot.
 pub async fn connect(database_url: &str) -> Result<PgPool> {
-    let pool = PgPool::connect(database_url).await?;
-    run_migrations(&pool).await?;
-    Ok(pool)
+    let mut last_err = anyhow::anyhow!("postgres connect: no attempts made");
+    for attempt in 1..=10u32 {
+        match PgPool::connect(database_url).await {
+            Ok(pool) => {
+                run_migrations(&pool).await?;
+                return Ok(pool);
+            }
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "postgres not ready, retrying in 3s");
+                last_err = e.into();
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Run coordinator DDL migrations inline. Idempotent (`IF NOT EXISTS`).

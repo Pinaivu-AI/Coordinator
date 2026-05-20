@@ -8,17 +8,30 @@ use redis::AsyncCommands;
 
 /// Connect to Redis and verify reachability with a `PING`. Returns a
 /// multiplexed `ConnectionManager` that auto-reconnects under load.
+///
+/// Retries for up to 30 seconds to tolerate the VSOCK socat bridge
+/// needing a moment to start listening after enclave boot.
 pub async fn connect(redis_url: &str) -> Result<ConnectionManager> {
     let client = redis::Client::open(redis_url).context("redis::Client::open")?;
-    let mut manager = ConnectionManager::new(client)
-        .await
-        .context("redis ConnectionManager::new")?;
-    let pong: String = redis::cmd("PING")
-        .query_async(&mut manager)
-        .await
-        .context("redis PING")?;
-    anyhow::ensure!(pong == "PONG", "unexpected PING reply: {pong}");
-    Ok(manager)
+    let mut last_err = anyhow::anyhow!("redis connect: no attempts made");
+    for attempt in 1..=10u32 {
+        match ConnectionManager::new(client.clone()).await {
+            Ok(mut manager) => {
+                let pong: String = redis::cmd("PING")
+                    .query_async(&mut manager)
+                    .await
+                    .context("redis PING")?;
+                anyhow::ensure!(pong == "PONG", "unexpected PING reply: {pong}");
+                return Ok(manager);
+            }
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "redis not ready, retrying in 3s");
+                last_err = e.into();
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Record a request-id replay-prevention nonce with TTL. Returns
