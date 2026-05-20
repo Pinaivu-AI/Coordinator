@@ -106,6 +106,7 @@ jobs:
           SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
           $SSH 'bash -s' << 'REMOTE'
           set -e
+          sudo docker system prune -af --volumes 2>/dev/null || true
           cd ~/pinaivu-coordinator && rm -rf out && mkdir -p out
           sudo docker build \
             --platform linux/amd64 \
