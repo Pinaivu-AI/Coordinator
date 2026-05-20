@@ -396,30 +396,22 @@ jobs:
       #
       # Prerequisites (one-time EC2 setup):
       #   - sui CLI installed and active address set to the operator address
-      # Secret needed:
-      #   PINAIVU_SUI_VARS  — newline-separated KEY=VALUE with
-      #                       PINAIVU_PACKAGE_ID, PINAIVU_ENCLAVE_CONFIG_ID,
-      #                       PINAIVU_CAP_ID, SUI_NETWORK
+      # Reads PINAIVU_PACKAGE_ID, PINAIVU_ENCLAVE_CONFIG_ID, PINAIVU_CAP_ID,
+      # SUI_NETWORK from ~/.env.runtime (populated earlier from
+      # PINAIVU_ENV_FILE secret).
       - name: Register coordinator on Sui
         env:
           EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
           EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
           EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
-          PINAIVU_SUI_VARS: ${{ secrets.PINAIVU_SUI_VARS }}
         run: |
           echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
           SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
 
-          printf '%s' "$PINAIVU_SUI_VARS" > /tmp/sui_vars.env
-          scp -o StrictHostKeyChecking=no -i /tmp/deploy_key \
-              /tmp/sui_vars.env "$EC2_USER@$EC2_HOST:/tmp/"
-          rm -f /tmp/sui_vars.env
-
           $SSH 'bash -s' << 'REMOTE'
           set -e
           sui --version
-          set -a; source /tmp/sui_vars.env; set +a
-          rm -f /tmp/sui_vars.env
+          set -a; source ~/.env.runtime; set +a
           chmod +x ~/pinaivu-coordinator/scripts/register-coordinator.sh
           ~/pinaivu-coordinator/scripts/register-coordinator.sh
           REMOTE
