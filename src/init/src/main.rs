@@ -130,6 +130,26 @@ fn main() {
         std::env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
     }
 
+    // ── /etc/hosts overrides for TLS-SNI-sensitive upstreams ─────────────────
+    // Postgres + Redis live behind a loopback socat bridge that forwards
+    // VSOCK to the real host. If we connect by IP, the client sends SNI=IP
+    // and TLS-terminating proxies (Supabase, Upstash) silently drop the
+    // connection. By mapping the real hostnames to 127.0.0.1, the URL
+    // hostname can stay correct while traffic still goes through the bridge.
+    {
+        let mut hosts = String::from("127.0.0.1 localhost\n");
+        for var in ["POSTGRES_BRIDGE_HOST", "REDIS_BRIDGE_HOST"] {
+            if let Ok(h) = std::env::var(var) {
+                let h = h.trim();
+                if !h.is_empty() {
+                    hosts.push_str(&format!("127.0.0.1 {h}\n"));
+                    dmesg(format!("/etc/hosts: 127.0.0.1 -> {h}"));
+                }
+            }
+        }
+        let _ = std::fs::write("/etc/hosts", hosts);
+    }
+
     // ── Sidecar coordination ──────────────────────────────────────────────────
     // Sidecar runs on loopback inside the enclave and signs Sui PTBs
     // on the coordinator's behalf. Both processes share SIDECAR_SECRET
