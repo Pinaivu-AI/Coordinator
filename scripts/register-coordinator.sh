@@ -50,9 +50,15 @@ sui client switch --env "$NETWORK" 2>/dev/null || \
 echo "Active network: $NETWORK"
 
 # ── Read PCRs ─────────────────────────────────────────────────────────────────
-PCR0=$(jq -r '.PCR0' "$PCR_FILE")
-PCR1=$(jq -r '.PCR1' "$PCR_FILE")
-PCR2=$(jq -r '.PCR2' "$PCR_FILE")
+# The .pcrs file emitted by eif_build is `<hex>  PCR<N>` per line, not JSON.
+PCR0=$(awk '$2=="PCR0"{print $1}' "$PCR_FILE")
+PCR1=$(awk '$2=="PCR1"{print $1}' "$PCR_FILE")
+PCR2=$(awk '$2=="PCR2"{print $1}' "$PCR_FILE")
+if [ -z "$PCR0" ] || [ -z "$PCR1" ] || [ -z "$PCR2" ]; then
+    echo "ERROR: failed to parse PCRs from $PCR_FILE" >&2
+    head -5 "$PCR_FILE" >&2
+    exit 1
+fi
 echo "PCR0 = $PCR0"
 echo "PCR1 = $PCR1"
 echo "PCR2 = $PCR2"

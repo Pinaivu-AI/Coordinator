@@ -101,18 +101,44 @@ jobs:
           EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
           EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
           EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          GIT_SHA: ${{ github.sha }}
         run: |
           echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
           SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
-          $SSH 'bash -s' << 'REMOTE'
+          $SSH "GIT_SHA=$GIT_SHA bash -s" << 'REMOTE'
           set -e
-          sudo docker system prune -af --volumes 2>/dev/null || true
-          cd ~/pinaivu-coordinator && rm -rf out && mkdir -p out
+          cd ~/pinaivu-coordinator
+
+          # ── Skip rebuild when source hasn't changed ─────────────────────
+          # out/.build-sha is stamped at end of every successful build.
+          # If it matches the current commit, the existing .eif is reusable.
+          if [ -f out/.build-sha ] && \
+             [ -f out/coordinator.eif ] && \
+             [ -f out/coordinator.pcrs ] && \
+             [ "$(cat out/.build-sha)" = "$GIT_SHA" ]; then
+              echo "Source unchanged ($GIT_SHA); reusing existing build."
+              cat out/coordinator.pcrs
+              exit 0
+          fi
+
+          # ── Only prune when disk > 70 % ─────────────────────────────────
+          USED=$(df --output=pcent / | tail -1 | tr -dc 0-9)
+          if [ "${USED:-0}" -ge 70 ]; then
+              echo "Disk ${USED}% used — pruning docker cache."
+              sudo docker system prune -af --volumes || true
+          else
+              echo "Disk ${USED}% used — keeping docker cache."
+          fi
+
+          mkdir -p out
+          # Keep prior layer cache; only the final exported artefact
+          # is re-emitted, so this is safe to overwrite.
           sudo docker build \
             --platform linux/amd64 \
             --progress=plain \
             --output type=local,dest=out/ \
             -f Containerfile . 2>&1 | tee out/docker.log
+          echo "$GIT_SHA" > out/.build-sha
           echo "--- PCR Measurements ---"
           cat out/coordinator.pcrs
           REMOTE
