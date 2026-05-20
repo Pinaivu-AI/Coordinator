@@ -214,5 +214,7 @@ fn main() {
         Err(e) => eprintln!("wait: {e}"),
     }
 
+    // Allow the log-relay bridge to drain before the enclave shuts down.
+    std::thread::sleep(std::time::Duration::from_secs(5));
     reboot();
 }
