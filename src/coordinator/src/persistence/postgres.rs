@@ -14,12 +14,16 @@ use sqlx::PgPool;
 pub async fn connect(database_url: &str) -> Result<PgPool> {
     let mut last_err = anyhow::anyhow!("postgres connect: no attempts made");
     for attempt in 1..=10u32 {
+        eprintln!("CHK 05.{attempt} PgPool::connect attempt");
         match PgPool::connect(database_url).await {
             Ok(pool) => {
+                eprintln!("CHK 05.{attempt} pool open; running migrations");
                 run_migrations(&pool).await?;
+                eprintln!("CHK 05.{attempt} migrations done");
                 return Ok(pool);
             }
             Err(e) => {
+                eprintln!("CHK 05.{attempt} connect failed: {e}");
                 tracing::warn!(attempt, error = %e, "postgres not ready, retrying in 3s");
                 last_err = e.into();
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
