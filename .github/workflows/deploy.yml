@@ -356,7 +356,10 @@ jobs:
             # ~/.env.runtime: static config from the GH secret (overwritten each deploy).
             # ~/.env.runtime.dynamic: written by post-boot scripts (e.g. register-coordinator.sh
             # appends PINAIVU_ENCLAVE_OBJECT_ID here). Survives deploys.
-            if cat ~/.env.runtime ~/.env.runtime.dynamic 2>/dev/null \
+            # `awk 1` re-emits each line with a trailing newline so a file
+            # without a final newline can't glue its last line onto the
+            # first line of the next file when we cat them.
+            if { awk 1 ~/.env.runtime 2>/dev/null; awk 1 ~/.env.runtime.dynamic 2>/dev/null; } \
                | grep -v '^[[:space:]]*#' \
                | grep -v '^[[:space:]]*$' \
                | socat - VSOCK-CONNECT:$CID:7000 2>/dev/null; then
