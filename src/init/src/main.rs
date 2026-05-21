@@ -85,18 +85,19 @@ fn bridge(left: &str, right: &str) {
     }
 }
 
-/// Tail a file and stream every new byte to a VSOCK peer. Runs in its
-/// own std::thread (no async runtime in init). Reconnects with backoff
-/// if the file isn't ready yet or the VSOCK connection drops, and
-/// re-opens the file every iteration so writers' appends past the old
-/// EOF are always visible (the previous "open once, read forever"
-/// version got stuck after the initial burst — never saw new bytes
-/// even though writers kept appending).
+/// Tail a file and stream every new byte to a VSOCK peer.
+///
+/// Earlier versions wrapped the VSOCK fd in std::fs::File and used
+/// write_all/flush. That hides socket-level errors (EPIPE on peer
+/// close, SIGPIPE on signal) — sends after the host's socat child
+/// exited just silently dropped. This version uses raw libc::send
+/// with MSG_NOSIGNAL so we get -1 + errno back and can reconnect.
 fn log_forwarder(path: &str, cid: u32, port: u32) {
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom};
     use std::time::Duration;
 
     let mut pos: u64 = 0;
+    let mut buf = [0u8; 4096];
 
     'outer: loop {
         let sock_fd = match vsock_connect(cid, port) {
@@ -106,12 +107,8 @@ fn log_forwarder(path: &str, cid: u32, port: u32) {
                 continue;
             }
         };
-        let mut sock = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(sock_fd) };
-        let mut buf = [0u8; 4096];
 
         loop {
-            // Fresh open each iteration so any truncate / inode swap is
-            // observed and we always see the file's current size.
             let mut file = match std::fs::File::open(path) {
                 Ok(f) => f,
                 Err(_) => {
@@ -119,32 +116,50 @@ fn log_forwarder(path: &str, cid: u32, port: u32) {
                     continue;
                 }
             };
-
-            // Detect truncate: if file shrank, restart from offset 0.
             let size = file.metadata().map(|m| m.len()).unwrap_or(0);
             if size < pos {
                 pos = 0;
             }
-
-            if size > pos {
-                if file.seek(SeekFrom::Start(pos)).is_err() {
-                    pos = 0;
+            if size <= pos {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            if file.seek(SeekFrom::Start(pos)).is_err() {
+                pos = 0;
+                continue;
+            }
+            let n = match file.read(&mut buf) {
+                Ok(0) => {
+                    std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
-                match file.read(&mut buf) {
-                    Ok(0) => std::thread::sleep(Duration::from_millis(100)),
-                    Ok(n) => {
-                        pos += n as u64;
-                        if sock.write_all(&buf[..n]).is_err() {
-                            continue 'outer;
-                        }
-                        let _ = sock.flush();
-                    }
-                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                Ok(n) => n,
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
                 }
-            } else {
-                std::thread::sleep(Duration::from_millis(100));
+            };
+
+            // Send with MSG_NOSIGNAL — partial sends loop, peer close
+            // gives -1/EPIPE which kicks us to reconnect.
+            let mut sent = 0usize;
+            while sent < n {
+                let rc = unsafe {
+                    libc::send(
+                        sock_fd,
+                        buf[sent..n].as_ptr() as *const libc::c_void,
+                        n - sent,
+                        libc::MSG_NOSIGNAL,
+                    )
+                };
+                if rc < 0 {
+                    unsafe { libc::close(sock_fd) };
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue 'outer;
+                }
+                sent += rc as usize;
             }
+            pos += n as u64;
         }
     }
 }
