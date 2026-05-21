@@ -199,6 +199,21 @@ const SettleSchema = z.object({
 
 const PINAIVU_VAULT_ID = (process.env.PINAIVU_VAULT_ID || "").trim();
 
+/**
+ * Decode a UUID string ("xxxx-xxxx-..." or no dashes) into 16 raw bytes.
+ * The Rust coordinator signs the receipt over the UUID's raw byte form
+ * (uuid::Uuid::as_bytes -> [u8; 16]); passing the 36-char ASCII string
+ * here would make the on-chain BCS bytes diverge from the signed bytes
+ * and verify_completion_receipt would abort EInvalidReceipt.
+ */
+function uuidStringToBytes(s: string): Uint8Array {
+    const hex = s.replace(/-/g, "");
+    if (hex.length !== 32 || !/^[0-9a-fA-F]+$/.test(hex)) {
+        throw new Error(`uuid expected 32 hex chars, got ${hex.length}: ${s}`);
+    }
+    return new Uint8Array(Buffer.from(hex, "hex"));
+}
+
 app.post("/sui/settle", async (req: Request, res: Response) => {
     const parsed = SettleSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -237,7 +252,7 @@ app.post("/sui/settle", async (req: Request, res: Response) => {
             arguments: [
                 tx.object(PINAIVU_VAULT_ID),
                 tx.object(activeEnclaveObjectId),
-                tx.pure.vector("u8", Array.from(Buffer.from(request_id))),
+                tx.pure.vector("u8", Array.from(uuidStringToBytes(request_id))),
                 tx.pure.address(payee_sui_address),
                 tx.pure.u64(amount_nanox),
                 tx.pure.u64(timestamp_ms),
