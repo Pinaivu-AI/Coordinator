@@ -252,9 +252,12 @@ fn main() {
         .expect("failed to spawn coordinator");
 
     // Forward coordinator logs to the parent host (collects into /tmp/coordinator.log there).
-    // Uses tail -f so the socat process stays alive as long as the coordinator writes.
+    // `pty,ctty` allocates a pseudo-terminal for tail so its stdout appears
+    // to be a TTY — libc then uses line-buffered output instead of the
+    // default block-buffered mode, which would otherwise hold every line
+    // after the first burst in tail's internal 4-8 KB buffer indefinitely.
     bridge(
-        "EXEC:'/bin/busybox tail -f /tmp/coordinator.log'",
+        "EXEC:'/bin/busybox tail -f /tmp/coordinator.log',pty,ctty",
         &format!("VSOCK-CONNECT:{PARENT_CID}:5000"),
     );
 
