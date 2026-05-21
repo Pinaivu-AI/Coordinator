@@ -42,6 +42,10 @@ pub fn build_router(state: app::AppState) -> Router {
         .route("/v1/nodes", get(api::nodes::list_nodes))
         .route("/v1/proofs/{request_id}", get(api::proofs::get_proof))
         .route("/v1/admin/set-enclave-id", post(api::admin::set_enclave_id))
+        .route(
+            "/v1/admin/settlements/{request_id}",
+            get(api::admin::settlement_status),
+        )
         .with_state(state)
 }
 

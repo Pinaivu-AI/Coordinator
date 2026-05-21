@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nautilus_enclave::EnclaveKeyPair;
+use sqlx::PgPool;
 use tokio::sync::RwLock;
 
 use crate::mesh::{Mesh, NoopMesh, PeerRegistry};
@@ -30,6 +31,7 @@ struct Inner {
     peer_registry: Arc<PeerRegistry>,
     receipt_archive: Arc<dyn ReceiptArchive>,
     on_chain: Arc<RwLock<Option<RegisteredEnclave>>>,
+    pg_pool: RwLock<Option<PgPool>>,
     started_at_ms: u64,
 }
 
@@ -123,9 +125,20 @@ impl AppState {
                 peer_registry,
                 receipt_archive,
                 on_chain,
+                pg_pool: RwLock::new(None),
                 started_at_ms,
             }),
         }
+    }
+
+    /// Attach a Postgres pool after construction so admin endpoints can
+    /// inspect persistent state (payments, dispatch_jobs, etc).
+    pub async fn set_pg_pool(&self, pool: PgPool) {
+        *self.inner.pg_pool.write().await = Some(pool);
+    }
+
+    pub async fn pg_pool(&self) -> Option<PgPool> {
+        self.inner.pg_pool.read().await.clone()
     }
 
     pub fn enclave_key(&self) -> &EnclaveKeyPair {

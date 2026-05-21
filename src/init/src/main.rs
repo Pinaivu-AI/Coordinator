@@ -85,6 +85,78 @@ fn bridge(left: &str, right: &str) {
     }
 }
 
+/// Tail a file and stream every new byte to a VSOCK peer. Runs in its
+/// own std::thread (no async runtime in init). Reconnects with backoff
+/// if the file isn't ready yet or the VSOCK connection drops.
+fn log_forwarder(path: &str, cid: u32, port: u32) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::time::Duration;
+
+    let mut file = loop {
+        match std::fs::File::open(path) {
+            Ok(f) => break f,
+            Err(_) => std::thread::sleep(Duration::from_millis(200)),
+        }
+    };
+    let _ = file.seek(SeekFrom::Start(0));
+
+    'outer: loop {
+        let sock_fd = match vsock_connect(cid, port) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("log_forwarder vsock connect: {e}");
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        // Wrap raw fd as a writeable File; on drop the kernel fd is closed.
+        let mut sock = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(sock_fd) };
+
+        let mut buf = [0u8; 4096];
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(100)),
+                Ok(n) => {
+                    if sock.write_all(&buf[..n]).is_err() {
+                        // VSOCK dropped — reconnect on the next outer loop.
+                        continue 'outer;
+                    }
+                    let _ = sock.flush();
+                }
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+}
+
+/// Open a VSOCK SOCK_STREAM connection to (cid, port) and return the fd.
+fn vsock_connect(cid: u32, port: u32) -> Result<i32, String> {
+    use libc::{connect, sockaddr, sockaddr_vm, socket, AF_VSOCK, SOCK_STREAM};
+    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err("vsock socket() failed".into());
+    }
+    let ret = unsafe {
+        let mut sa: sockaddr_vm = std::mem::zeroed();
+        sa.svm_family = AF_VSOCK as _;
+        sa.svm_port = port;
+        sa.svm_cid = cid;
+        connect(
+            fd,
+            &sa as *const _ as *const sockaddr,
+            std::mem::size_of::<sockaddr_vm>() as _,
+        )
+    };
+    if ret < 0 {
+        unsafe { libc::close(fd) };
+        Err(format!("vsock connect({cid}, {port}) failed"))
+    } else {
+        Ok(fd)
+    }
+}
+
 fn main() {
     init_rootfs();
     init_console();
@@ -251,15 +323,13 @@ fn main() {
         .spawn()
         .expect("failed to spawn coordinator");
 
-    // Forward coordinator logs to the parent host (collects into /tmp/coordinator.log there).
-    // `pty,ctty` allocates a pseudo-terminal for tail so its stdout appears
-    // to be a TTY — libc then uses line-buffered output instead of the
-    // default block-buffered mode, which would otherwise hold every line
-    // after the first burst in tail's internal 4-8 KB buffer indefinitely.
-    bridge(
-        "EXEC:'/bin/busybox tail -f /tmp/coordinator.log',pty,ctty",
-        &format!("VSOCK-CONNECT:{PARENT_CID}:5000"),
-    );
+    // Forward enclave logs to the parent host via a native Rust thread
+    // instead of `socat EXEC:tail`. Previous shell-stack approaches all
+    // hit a buffering wall after the first chunk: tail's libc stdio went
+    // block-buffered against socat's pipe and never flushed line-sized
+    // writes. Reading the file directly and pushing to the VSOCK socket
+    // ourselves means there's no userland buffer between writers and host.
+    std::thread::spawn(|| log_forwarder("/tmp/coordinator.log", PARENT_CID, 5000));
 
     match child.wait() {
         Ok(s) => dmesg(format!("coordinator exited: {s}")),

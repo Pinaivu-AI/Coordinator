@@ -4,14 +4,37 @@
 //! because it pushed it into ~/.env.runtime; nobody else does.
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{app::AppState, onchain::RegisteredEnclave};
+
+fn check_secret(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let expected = std::env::var("SIDECAR_SECRET").map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "SIDECAR_SECRET not configured"})),
+        )
+    })?;
+    let supplied = headers
+        .get("x-sidecar-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if supplied.as_bytes().len() != expected.as_bytes().len()
+        || !constant_time_eq(supplied.as_bytes(), expected.as_bytes())
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "bad or missing X-Sidecar-Secret"})),
+        ));
+    }
+    Ok(expected)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SetEnclaveIdReq {
@@ -35,30 +58,10 @@ pub async fn set_enclave_id(
     headers: HeaderMap,
     Json(req): Json<SetEnclaveIdReq>,
 ) -> impl IntoResponse {
-    let expected = match std::env::var("SIDECAR_SECRET") {
+    let expected = match check_secret(&headers) {
         Ok(s) => s,
-        Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "SIDECAR_SECRET not configured"})),
-            )
-                .into_response();
-        }
+        Err((code, body)) => return (code, body).into_response(),
     };
-
-    let supplied = headers
-        .get("x-sidecar-secret")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if supplied.as_bytes().len() != expected.as_bytes().len()
-        || !constant_time_eq(supplied.as_bytes(), expected.as_bytes())
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "bad or missing X-Sidecar-Secret"})),
-        )
-            .into_response();
-    }
 
     let id = req.enclave_object_id.trim().to_string();
     if id.is_empty() {
@@ -110,6 +113,103 @@ pub async fn set_enclave_id(
         }),
     )
         .into_response()
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentRow {
+    pub id: String,
+    pub request_id: String,
+    pub payee_peer_id: String,
+    pub payee_sui_address: String,
+    pub amount_nanox: i64,
+    pub status: String,
+    pub tx_digest: Option<String>,
+    pub created_at: String,
+    pub submitted_at: Option<String>,
+    pub confirmed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettlementStatusResp {
+    pub request_id: String,
+    pub payments: Vec<PaymentRow>,
+}
+
+/// Inspect all payment rows for a request_id. Auth'd; used to debug why
+/// vault::settle hasn't landed on-chain when the routing receipt exists.
+pub async fn settlement_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err((code, body)) = check_secret(&headers) {
+        return (code, body).into_response();
+    }
+
+    let req_uuid = match Uuid::parse_str(&request_id) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "request_id is not a uuid"})),
+            )
+                .into_response();
+        }
+    };
+
+    let pool = match state.pg_pool().await {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "pg pool not attached"})),
+            )
+                .into_response();
+        }
+    };
+
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, i64, String, Option<String>, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT id, request_id, payee_peer_id, payee_sui_address, amount_nanox, status, tx_digest, created_at, submitted_at, confirmed_at
+         FROM payments
+         WHERE request_id = $1
+         ORDER BY created_at"
+    )
+        .bind(req_uuid)
+        .fetch_all(&pool)
+        .await;
+
+    match rows {
+        Ok(rows) => {
+            let payments = rows
+                .into_iter()
+                .map(|r| PaymentRow {
+                    id: r.0.to_string(),
+                    request_id: r.1.to_string(),
+                    payee_peer_id: r.2,
+                    payee_sui_address: r.3,
+                    amount_nanox: r.4,
+                    status: r.5,
+                    tx_digest: r.6,
+                    created_at: r.7.to_rfc3339(),
+                    submitted_at: r.8.map(|t| t.to_rfc3339()),
+                    confirmed_at: r.9.map(|t| t.to_rfc3339()),
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(SettlementStatusResp {
+                    request_id,
+                    payments,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("query payments: {e}")})),
+        )
+            .into_response(),
+    }
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

@@ -174,6 +174,7 @@ async fn run() -> Result<()> {
         receipt_archive,
         on_chain_state,
     );
+    state.set_pg_pool(pg_pool.clone()).await;
 
     let (listener, local) = coordinator::bind(&cfg.bind_addr).await?;
     tracing::info!(listening = %local, "coordinator http ready");
