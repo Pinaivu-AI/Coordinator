@@ -89,6 +89,7 @@ jobs:
           fi
           command -v socat &> /dev/null || $PKG install -y socat
           command -v jq    &> /dev/null || $PKG install -y jq
+          command -v node  &> /dev/null || $PKG install -y nodejs
           echo "Dependencies ready"
           REMOTE
           rm -f /tmp/deploy_key
