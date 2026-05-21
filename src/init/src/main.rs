@@ -87,45 +87,63 @@ fn bridge(left: &str, right: &str) {
 
 /// Tail a file and stream every new byte to a VSOCK peer. Runs in its
 /// own std::thread (no async runtime in init). Reconnects with backoff
-/// if the file isn't ready yet or the VSOCK connection drops.
+/// if the file isn't ready yet or the VSOCK connection drops, and
+/// re-opens the file every iteration so writers' appends past the old
+/// EOF are always visible (the previous "open once, read forever"
+/// version got stuck after the initial burst — never saw new bytes
+/// even though writers kept appending).
 fn log_forwarder(path: &str, cid: u32, port: u32) {
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::time::Duration;
 
-    let mut file = loop {
-        match std::fs::File::open(path) {
-            Ok(f) => break f,
-            Err(_) => std::thread::sleep(Duration::from_millis(200)),
-        }
-    };
-    let _ = file.seek(SeekFrom::Start(0));
+    let mut pos: u64 = 0;
 
     'outer: loop {
         let sock_fd = match vsock_connect(cid, port) {
             Ok(fd) => fd,
-            Err(e) => {
-                eprintln!("log_forwarder vsock connect: {e}");
+            Err(_) => {
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
-        // Wrap raw fd as a writeable File; on drop the kernel fd is closed.
         let mut sock = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(sock_fd) };
-
         let mut buf = [0u8; 4096];
+
         loop {
-            match file.read(&mut buf) {
-                Ok(0) => std::thread::sleep(Duration::from_millis(100)),
-                Ok(n) => {
-                    if sock.write_all(&buf[..n]).is_err() {
-                        // VSOCK dropped — reconnect on the next outer loop.
-                        continue 'outer;
-                    }
-                    let _ = sock.flush();
-                }
+            // Fresh open each iteration so any truncate / inode swap is
+            // observed and we always see the file's current size.
+            let mut file = match std::fs::File::open(path) {
+                Ok(f) => f,
                 Err(_) => {
-                    std::thread::sleep(Duration::from_millis(100));
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
                 }
+            };
+
+            // Detect truncate: if file shrank, restart from offset 0.
+            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            if size < pos {
+                pos = 0;
+            }
+
+            if size > pos {
+                if file.seek(SeekFrom::Start(pos)).is_err() {
+                    pos = 0;
+                    continue;
+                }
+                match file.read(&mut buf) {
+                    Ok(0) => std::thread::sleep(Duration::from_millis(100)),
+                    Ok(n) => {
+                        pos += n as u64;
+                        if sock.write_all(&buf[..n]).is_err() {
+                            continue 'outer;
+                        }
+                        let _ = sock.flush();
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
     }
