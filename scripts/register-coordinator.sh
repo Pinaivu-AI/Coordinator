@@ -153,4 +153,23 @@ else
         echo "PINAIVU_ENCLAVE_OBJECT_ID=$ENCLAVE_OBJECT_ID" >> "$DYNAMIC_ENV"
     fi
     echo "persisted to $DYNAMIC_ENV — next deploy's sidecar will pick it up on boot"
+
+    # Push the id into the running sidecar via the coordinator's admin
+    # proxy so the current deploy can settle without waiting for a reboot.
+    if [ -n "${SIDECAR_SECRET:-}" ]; then
+        echo ""
+        echo "Pushing enclave_object_id to running coordinator..."
+        PUSH_RESP=$(curl -sf -X POST "${COORDINATOR_URL}/v1/admin/set-enclave-id" \
+            -H 'content-type: application/json' \
+            -H "x-sidecar-secret: ${SIDECAR_SECRET}" \
+            -d "{\"enclave_object_id\":\"$ENCLAVE_OBJECT_ID\",\"tx_digest\":\"$REG_DIGEST\"}" \
+            || true)
+        if [ -n "$PUSH_RESP" ]; then
+            echo "  response: $PUSH_RESP"
+        else
+            echo "  WARNING: admin push failed; sidecar will pick up id on next boot only" >&2
+        fi
+    else
+        echo "SIDECAR_SECRET not set — skipping live admin push (next boot will pick up id)"
+    fi
 fi
