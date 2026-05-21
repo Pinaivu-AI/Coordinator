@@ -15,25 +15,33 @@ use uuid::Uuid;
 use crate::{app::AppState, onchain::RegisteredEnclave};
 
 fn check_secret(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let expected = std::env::var("SIDECAR_SECRET").map_err(|_| {
+    let raw = std::env::var("SIDECAR_SECRET").map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "SIDECAR_SECRET not configured"})),
         )
     })?;
+    let expected = raw.trim();
     let supplied = headers
         .get("x-sidecar-secret")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .trim();
     if supplied.as_bytes().len() != expected.as_bytes().len()
         || !constant_time_eq(supplied.as_bytes(), expected.as_bytes())
     {
+        tracing::warn!(
+            supplied_len = supplied.len(),
+            expected_len = expected.len(),
+            raw_env_len = raw.len(),
+            "admin secret mismatch"
+        );
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "bad or missing X-Sidecar-Secret"})),
         ));
     }
-    Ok(expected)
+    Ok(expected.to_string())
 }
 
 #[derive(Debug, Deserialize)]
