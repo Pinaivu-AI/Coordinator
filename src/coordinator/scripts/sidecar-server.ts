@@ -216,31 +216,20 @@ app.post("/sui/settle", async (req: Request, res: Response) => {
     try {
         const tx = new Transaction();
 
-        // Encode payouts as BCS vector<Payout> matching Move struct layout:
-        // each Payout = { sui_address: address (32 bytes), amount: u64 }
-        // We pass it as a raw BCS-encoded vector using pure.vector("u8", bytes).
-        // Build the BCS manually: u64 length prefix (ULEB128) + entries.
-        function encodeBcsU64(n: bigint): Uint8Array {
-            const buf = new Uint8Array(8);
-            for (let i = 0; i < 8; i++) { buf[i] = Number((n >> BigInt(8 * i)) & 0xffn); }
-            return buf;
-        }
-        function encodeUleb128(n: number): Uint8Array {
-            const bytes: number[] = [];
-            do { let byte = n & 0x7f; n >>= 7; if (n > 0) byte |= 0x80; bytes.push(byte); } while (n > 0);
-            return new Uint8Array(bytes);
-        }
-        function padSuiAddress(addr: string): Uint8Array {
-            const hex = addr.replace(/^0x/, "").padStart(64, "0");
-            return new Uint8Array(Buffer.from(hex, "hex"));
-        }
-
-        const payoutChunks: Uint8Array[] = [encodeUleb128(payouts.length)];
-        for (const p of payouts) {
-            payoutChunks.push(padSuiAddress(p.sui_address));
-            payoutChunks.push(encodeBcsU64(BigInt(p.amount_nanox)));
-        }
-        const payoutsBcs = Buffer.concat(payoutChunks as Buffer[]);
+        // Build `vector<receipts::Payout>` by chaining Move calls inside
+        // the PTB: vault::settle takes a typed struct vector, not raw
+        // BCS bytes, so the previous hand-rolled BCS approach was rejected
+        // with CommandArgumentError { kind: InvalidUsageOfPureArg }.
+        const payoutHandles = payouts.map((p) =>
+            tx.moveCall({
+                target: `${PINAIVU_PACKAGE_ID}::receipts::new_payout`,
+                arguments: [tx.pure.address(p.sui_address), tx.pure.u64(p.amount_nanox)],
+            }),
+        );
+        const payoutsVec = tx.makeMoveVec({
+            type: `${PINAIVU_PACKAGE_ID}::receipts::Payout`,
+            elements: payoutHandles,
+        });
 
         tx.moveCall({
             target: `${PINAIVU_PACKAGE_ID}::vault::settle`,
@@ -253,7 +242,7 @@ app.post("/sui/settle", async (req: Request, res: Response) => {
                 tx.pure.u64(amount_nanox),
                 tx.pure.u64(timestamp_ms),
                 tx.pure.vector("u8", Array.from(Buffer.from(aggregated_output_hash, "hex"))),
-                tx.pure.vector("u8", Array.from(payoutsBcs)),
+                payoutsVec,
                 tx.pure.vector("u8", Array.from(Buffer.from(signature, "hex"))),
             ],
         });
