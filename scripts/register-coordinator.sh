@@ -139,4 +139,18 @@ else
     echo "  enclave_object_id = $ENCLAVE_OBJECT_ID"
     echo "  tx_digest         = $REG_DIGEST"
     echo "ENCLAVE_OBJECT_ID=$ENCLAVE_OBJECT_ID"
+
+    # Persist the id so the next enclave boot pushes it to the sidecar via
+    # VSOCK:7000. ~/.env.runtime is rewritten from the GH secret each
+    # deploy, so we use a sibling file that the deploy concatenates at
+    # config-push time.
+    DYNAMIC_ENV="$HOME/.env.runtime.dynamic"
+    touch "$DYNAMIC_ENV"
+    chmod 600 "$DYNAMIC_ENV"
+    if grep -q '^PINAIVU_ENCLAVE_OBJECT_ID=' "$DYNAMIC_ENV"; then
+        sed -i "s|^PINAIVU_ENCLAVE_OBJECT_ID=.*|PINAIVU_ENCLAVE_OBJECT_ID=$ENCLAVE_OBJECT_ID|" "$DYNAMIC_ENV"
+    else
+        echo "PINAIVU_ENCLAVE_OBJECT_ID=$ENCLAVE_OBJECT_ID" >> "$DYNAMIC_ENV"
+    fi
+    echo "persisted to $DYNAMIC_ENV — next deploy's sidecar will pick it up on boot"
 fi

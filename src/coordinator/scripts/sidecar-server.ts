@@ -62,9 +62,13 @@ console.log(`[sidecar] operator address: ${operatorAddress}`);
 
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC_URL, network: NETWORK });
 
-// Active Enclave<PinaivuCoordinator> object ID — set by the coordinator
-// after a successful register_enclave call. Required by vault::settle.
-let activeEnclaveObjectId: string = "";
+// Active Enclave<PinaivuCoordinator> object ID — required by vault::settle.
+// Seeded from PINAIVU_ENCLAVE_OBJECT_ID (pushed via VSOCK:7000 on boot)
+// and overridable at runtime via PUT /sui/set-enclave-id for hot updates.
+let activeEnclaveObjectId: string = (process.env.PINAIVU_ENCLAVE_OBJECT_ID || "").trim();
+if (activeEnclaveObjectId) {
+    console.log(`[sidecar] active enclave object id from env: ${activeEnclaveObjectId}`);
+}
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
