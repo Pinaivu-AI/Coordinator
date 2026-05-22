@@ -36,6 +36,8 @@ bcs = "0.1"
 
 # crypto
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 
@@ -48,6 +50,7 @@ async-trait = "0.1"
 
 # misc
 uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 prometheus = "0.13"
@@ -98,5 +101,4 @@ base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
-rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

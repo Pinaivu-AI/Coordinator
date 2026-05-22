@@ -17,6 +17,10 @@ pub async fn health() -> &'static str {
 #[derive(Serialize)]
 pub struct EnclaveHealthResponse {
     pub public_key_hex: String,
+    /// X25519 public key derived from the same enclave seed.
+    /// Clients use this to set up an ECDH session before encrypting
+    /// their messages for `POST /v1/chat/completions`.
+    pub x25519_pubkey_hex: String,
     pub peer_id: Option<String>,
     pub uptime_ms: u64,
     /// Set once the background registration task completes; `null` until then.
@@ -26,9 +30,11 @@ pub struct EnclaveHealthResponse {
 
 pub async fn enclave_health(State(state): State<AppState>) -> Json<EnclaveHealthResponse> {
     let pubkey = state.enclave_pubkey_bytes();
+    let x25519_pubkey = state.enclave_key().x25519_public_key();
     let on_chain = state.on_chain().read().await;
     Json(EnclaveHealthResponse {
         public_key_hex: hex::encode(pubkey),
+        x25519_pubkey_hex: hex::encode(x25519_pubkey.as_bytes()),
         peer_id: peer_id_from_ed25519(&pubkey),
         uptime_ms: state.uptime_ms(),
         enclave_object_id: on_chain.as_ref().map(|r| r.enclave_object_id.clone()),
