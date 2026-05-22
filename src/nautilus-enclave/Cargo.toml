@@ -12,6 +12,8 @@ aws = ["aws-nitro-enclaves-nsm-api"]
 [dependencies]
 anyhow = "1"
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
