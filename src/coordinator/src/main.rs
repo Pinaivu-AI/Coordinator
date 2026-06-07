@@ -11,9 +11,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use rustls;
+use sha2::Digest;
 use coordinator::{
     app,
+    generate_self_signed_tls,
     jobs::{store::PgJobStore, worker::spawn_dispatch_worker},
+    make_tls_config,
     mesh::{spawn_libp2p_mesh_full, PeerRegistry},
     observability,
     onchain::{spawn_registration, RegisteredEnclave, SidecarClient},
@@ -166,6 +170,32 @@ async fn run() -> Result<()> {
         Err(e) => tracing::warn!(?e, "sidecar client unavailable; skipping registration"),
     }
 
+    // ── TLS setup ──────────────────────────────────────────────────────────
+    // rustls 0.23 requires an explicit crypto provider. Install ring once
+    // before any TLS operations; safe to call multiple times.
+    rustls::crypto::ring::default_provider().install_default().ok();
+
+    let san_ips: Vec<String> = std::env::var("PINAIVU_TLS_SAN_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let (tls_config, tls_fingerprint) = if cfg.has_tls_certs() {
+        let cert_pem = cfg.tls_cert_pem.unwrap().into_bytes();
+        let key_pem  = cfg.tls_key_pem.unwrap().into_bytes();
+        // Parse the first DER cert out of the PEM to compute its fingerprint.
+        let fp = cert_fingerprint_from_pem(&cert_pem)
+            .unwrap_or_else(|| "unknown".into());
+        eprintln!("CHK 04.1 using operator-supplied TLS cert; fingerprint={fp}");
+        (make_tls_config(cert_pem, key_pem).await?, fp)
+    } else {
+        eprintln!("CHK 04.1 generating self-signed TLS cert (no PINAIVU_TLS_CERT set)");
+        generate_self_signed_tls(&san_ips).await?
+    };
+    eprintln!("CHK 04.2 TLS config ready; fingerprint={tls_fingerprint}");
+
     // ── HTTP server ────────────────────────────────────────────────────────
     let state = app::AppState::with_full_archive_and_chain(
         enclave_key,
@@ -175,13 +205,24 @@ async fn run() -> Result<()> {
         on_chain_state,
     );
     state.set_pg_pool(pg_pool.clone()).await;
+    state.set_tls_cert_fingerprint(tls_fingerprint).await;
 
-    let (listener, local) = coordinator::bind(&cfg.bind_addr).await?;
-    tracing::info!(listening = %local, "coordinator http ready");
+    let bind_addr: std::net::SocketAddr = cfg.bind_addr.parse()
+        .map_err(|e| anyhow::anyhow!("invalid PINAIVU_BIND address: {e}"))?;
+
+    tracing::info!(listening = %bind_addr, "coordinator https ready");
+
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
+    });
 
     let router = coordinator::build_router(state);
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+    axum_server::bind_rustls(bind_addr, tls_config)
+        .handle(handle)
+        .serve(router.into_make_service())
         .await?;
 
     tracing::info!("coordinator exited cleanly");
@@ -193,4 +234,19 @@ async fn shutdown_signal() {
         tracing::warn!(?err, "failed to install ctrl_c handler");
     }
     tracing::info!("shutdown signal received");
+}
+
+/// Extract the SHA-256 fingerprint of the first certificate in a PEM block.
+/// Strips the header/footer lines, base64-decodes the body to get the DER,
+/// and hashes it — no extra crate needed.
+fn cert_fingerprint_from_pem(pem: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(pem).ok()?;
+    let b64: String = text
+        .lines()
+        .skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE-----"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("-----END CERTIFICATE-----"))
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    Some(hex::encode(sha2::Sha256::digest(&der)))
 }
