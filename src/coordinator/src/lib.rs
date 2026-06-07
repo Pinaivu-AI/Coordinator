@@ -27,6 +27,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
 /// Build the axum router with the given shared state.
@@ -55,4 +57,41 @@ pub async fn bind(addr: &str) -> Result<(TcpListener, std::net::SocketAddr)> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     Ok((listener, local))
+}
+
+/// Build a `RustlsConfig` from raw PEM bytes (cert + key).
+/// Used when the operator supplies a real certificate via env vars.
+pub async fn make_tls_config(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> Result<RustlsConfig> {
+    RustlsConfig::from_pem(cert_pem, key_pem)
+        .await
+        .map_err(|e| anyhow::anyhow!("TLS config from PEM: {e}"))
+}
+
+/// Generate a self-signed TLS certificate valid for `localhost` and
+/// `127.0.0.1` using a fresh Ed25519 key. Returns `(RustlsConfig,
+/// fingerprint)` where `fingerprint` is the SHA-256 hex digest of
+/// the certificate's DER encoding — expose this via `/enclave_health`
+/// so clients can pin the cert without trusting a CA.
+///
+/// Called at enclave boot when no operator cert is configured.
+pub async fn generate_self_signed_tls(san_ips: &[String]) -> Result<(RustlsConfig, String)> {
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+
+    let mut sans: Vec<String> = vec!["localhost".into()];
+    sans.extend_from_slice(san_ips);
+
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(sans).map_err(|e| anyhow::anyhow!("rcgen: {e}"))?;
+
+    let cert_pem = cert.pem().into_bytes();
+    let key_pem  = key_pair.serialize_pem().into_bytes();
+    let cert_der = cert.der().to_vec();
+
+    let fingerprint = hex::encode(Sha256::digest(&cert_der));
+
+    let tls = RustlsConfig::from_pem(cert_pem, key_pem)
+        .await
+        .map_err(|e| anyhow::anyhow!("RustlsConfig from generated cert: {e}"))?;
+
+    Ok((tls, fingerprint))
 }
