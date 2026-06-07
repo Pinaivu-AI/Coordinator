@@ -50,8 +50,13 @@ pub struct InferenceBid {
     /// node's share if it wins and serves the request. Required for
     /// `vault::settle` to be able to pay this peer.
     pub payout_address: String,
-    // TODO: model info, capacity hints.
-    // Deliberately NO `has_tee` field — GPU nodes are not TEE components.
+    /// X25519 public key the node uses for prompt encryption.
+    /// Nodes that support encrypted prompts set this; `None` means
+    /// the node accepts plaintext only. The coordinator copies this
+    /// into the `DispatchToken` so the client can ECDH-encrypt the
+    /// prompt before posting to `node_url/v1/inference`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_x25519_pubkey: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
