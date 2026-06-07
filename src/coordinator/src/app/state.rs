@@ -33,6 +33,10 @@ struct Inner {
     on_chain: Arc<RwLock<Option<RegisteredEnclave>>>,
     pg_pool: RwLock<Option<PgPool>>,
     started_at_ms: u64,
+    /// SHA-256 fingerprint (hex) of the TLS certificate in use.
+    /// Set once after the server binds; `None` until then or when
+    /// running without TLS (tests / plain-HTTP mode).
+    tls_cert_fingerprint: RwLock<Option<String>>,
 }
 
 impl AppState {
@@ -127,6 +131,7 @@ impl AppState {
                 on_chain,
                 pg_pool: RwLock::new(None),
                 started_at_ms,
+                tls_cert_fingerprint: RwLock::new(None),
             }),
         }
     }
@@ -179,6 +184,14 @@ impl AppState {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         now_ms.saturating_sub(self.inner.started_at_ms)
+    }
+
+    pub async fn set_tls_cert_fingerprint(&self, fingerprint: String) {
+        *self.inner.tls_cert_fingerprint.write().await = Some(fingerprint);
+    }
+
+    pub async fn tls_cert_fingerprint(&self) -> Option<String> {
+        self.inner.tls_cert_fingerprint.read().await.clone()
     }
 }
 
