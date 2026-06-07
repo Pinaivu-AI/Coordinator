@@ -93,7 +93,7 @@ socat VSOCK-LISTEN:5000,reuseaddr,fork \
 
 echo ""
 echo "All bridges active."
-echo "Test: curl http://localhost:4000/health"
+echo "Test: curl -k https://localhost:4000/health"
 echo "Logs: tail -f enclave.log"
 echo ""
 
