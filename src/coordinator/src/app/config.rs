@@ -19,6 +19,12 @@ pub struct Config {
     /// Redis URL — replay nonces and short-lived hot caches. In prod
     /// the VSOCK:8102 socat bridge forwards this to Upstash.
     pub redis_url: String,
+    /// PEM-encoded TLS certificate. If both `tls_cert_pem` and
+    /// `tls_key_pem` are set the server binds HTTPS; otherwise a
+    /// self-signed certificate is generated at boot.
+    pub tls_cert_pem: Option<String>,
+    /// PEM-encoded TLS private key matching `tls_cert_pem`.
+    pub tls_key_pem: Option<String>,
 }
 
 impl Config {
@@ -31,11 +37,20 @@ impl Config {
             .context("DATABASE_URL not set (required for receipts + jobs storage)")?;
         let redis_url = std::env::var("REDIS_URL")
             .context("REDIS_URL not set (required for replay-nonce caching)")?;
+        let tls_cert_pem = std::env::var("PINAIVU_TLS_CERT").ok();
+        let tls_key_pem  = std::env::var("PINAIVU_TLS_KEY").ok();
         Ok(Self {
             bind_addr,
             libp2p_listen,
             database_url,
             redis_url,
+            tls_cert_pem,
+            tls_key_pem,
         })
+    }
+
+    /// Returns true when an operator-supplied TLS certificate and key are present.
+    pub fn has_tls_certs(&self) -> bool {
+        self.tls_cert_pem.is_some() && self.tls_key_pem.is_some()
     }
 }
