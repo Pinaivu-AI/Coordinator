@@ -26,12 +26,19 @@ pub struct EnclaveHealthResponse {
     /// Set once the background registration task completes; `null` until then.
     pub enclave_object_id: Option<String>,
     pub sui_tx_digest: Option<String>,
+    /// SHA-256 fingerprint (hex, 64 chars) of the TLS certificate the
+    /// coordinator is serving. Clients must pin this value when
+    /// connecting over HTTPS; they can cross-check it against the
+    /// attestation document to verify the certificate was generated
+    /// inside the Nitro Enclave. `null` when running without TLS.
+    pub tls_cert_fingerprint: Option<String>,
 }
 
 pub async fn enclave_health(State(state): State<AppState>) -> Json<EnclaveHealthResponse> {
     let pubkey = state.enclave_pubkey_bytes();
     let x25519_pubkey = state.enclave_key().x25519_public_key();
     let on_chain = state.on_chain().read().await;
+    let tls_cert_fingerprint = state.tls_cert_fingerprint().await;
     Json(EnclaveHealthResponse {
         public_key_hex: hex::encode(pubkey),
         x25519_pubkey_hex: hex::encode(x25519_pubkey.as_bytes()),
@@ -39,6 +46,7 @@ pub async fn enclave_health(State(state): State<AppState>) -> Json<EnclaveHealth
         uptime_ms: state.uptime_ms(),
         enclave_object_id: on_chain.as_ref().map(|r| r.enclave_object_id.clone()),
         sui_tx_digest: on_chain.as_ref().map(|r| r.tx_digest.clone()),
+        tls_cert_fingerprint,
     })
 }
 
