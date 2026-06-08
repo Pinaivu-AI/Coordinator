@@ -19,6 +19,9 @@ pub enum AppError {
     #[error("no nodes available: {0}")]
     NoNodes(String),
 
+    #[error("rate limit exceeded")]
+    RateLimited,
+
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -30,6 +33,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::NoNodes(_) => StatusCode::SERVICE_UNAVAILABLE,
+            AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = serde_json::json!({ "error": self.to_string() });
