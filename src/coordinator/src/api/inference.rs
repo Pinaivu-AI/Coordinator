@@ -149,6 +149,7 @@ pub async fn chat_completions(
         issued_at_ms: now_ms,
         deadline_ms: now_ms + DISPATCH_DEADLINE_MS,
         coordinator_pubkey: [0u8; 32],
+        node_x25519_pubkey: winner.node_x25519_pubkey,
         signature: Vec::new(),
     }
     .sign(state.enclave_key().signing_key());

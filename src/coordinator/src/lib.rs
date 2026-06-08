@@ -104,9 +104,9 @@ pub async fn make_tls_config(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> Result<Rust
 }
 
 /// Generate a self-signed TLS certificate valid for `localhost` plus any
-/// extra IP SANs supplied via `san_ips`. Returns `(RustlsConfig, fingerprint)`
-/// where `fingerprint` is the SHA-256 hex of the cert DER — expose this
-/// in `/enclave_health` so clients can pin without a CA.
+/// extra IP SANs. Returns `(RustlsConfig, fingerprint)` where `fingerprint`
+/// is the SHA-256 hex of the cert DER — expose via `/enclave_health`
+/// so clients can pin without trusting a CA.
 pub async fn generate_self_signed_tls(san_ips: &[String]) -> Result<(RustlsConfig, String)> {
     use rcgen::{CertifiedKey, generate_simple_self_signed};
 

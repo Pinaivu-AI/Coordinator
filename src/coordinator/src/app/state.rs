@@ -16,9 +16,6 @@ use crate::mesh::{Mesh, NoopMesh, PeerRegistry};
 use crate::onchain::RegisteredEnclave;
 use crate::receipts::{InMemoryReceiptArchive, ReceiptArchive};
 
-/// How long an un-refreshed peer stays in the in-enclave registry
-/// before being evicted. Five times the default announce interval —
-/// gives plenty of slack for a single missed broadcast.
 const DEFAULT_PEER_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
@@ -43,8 +40,6 @@ struct Inner {
 }
 
 impl AppState {
-    /// New state with a freshly-generated keypair, a `NoopMesh`, and
-    /// an empty `PeerRegistry`. Convenience for tests and dev.
     pub fn new() -> Self {
         Self::with_full(
             Arc::new(EnclaveKeyPair::generate()),
@@ -53,8 +48,6 @@ impl AppState {
         )
     }
 
-    /// New state with an explicit mesh; keypair and peer registry are
-    /// generated. Used by tests that inject an `InMemoryMesh`.
     pub fn with_mesh(mesh: Arc<dyn Mesh>) -> Self {
         Self::with_full(
             Arc::new(EnclaveKeyPair::generate()),
@@ -63,7 +56,6 @@ impl AppState {
         )
     }
 
-    /// New state with an explicit mesh and peer registry.
     pub fn with_mesh_and_registry(
         mesh: Arc<dyn Mesh>,
         peer_registry: Arc<PeerRegistry>,

@@ -142,6 +142,7 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
         reputation: 0.95,
         http_endpoint: "http://mock-node-primary.test:5000".into(),
         payout_address: "0xMOCK-NODE-PRIMARY-payout".into(),
+        node_x25519_pubkey: None,
     };
     let mock = spawn_mock_node(bid_template).await.expect("mock node");
 

@@ -54,6 +54,7 @@ fn one_bidder_mesh() -> Arc<InMemoryMesh> {
         reputation:    0.9,
         payout_address: "0xenc".into(),
         http_endpoint: "http://enc-node.test:5000".into(),
+        node_x25519_pubkey: None,
     }]);
     mesh
 }

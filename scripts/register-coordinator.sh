@@ -23,7 +23,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COORDINATOR_URL="${COORDINATOR_URL:-http://localhost:4000}"
+COORDINATOR_URL="${COORDINATOR_URL:-https://localhost:4000}"
+# -k: coordinator serves a self-signed cert generated inside the enclave;
+# the cert is verified via tls_cert_fingerprint in /enclave_health, not CA.
+CURL_INSECURE="-k"
 PCR_FILE="${PCR_FILE:-$HOME/pinaivu-coordinator/out/coordinator.pcrs}"
 NETWORK="${SUI_NETWORK:-mainnet}"
 GAS_BUDGET="${GAS_BUDGET:-200000000}"
@@ -93,7 +96,7 @@ fi
 # ── Fetch the live attestation from the coordinator ────────────────────────
 echo ""
 echo "Fetching NSM attestation from ${COORDINATOR_URL}/get_attestation..."
-ATT_RESP=$(curl -sf --connect-timeout 5 "${COORDINATOR_URL}/get_attestation")
+ATT_RESP=$(curl -sf $CURL_INSECURE --connect-timeout 5 "${COORDINATOR_URL}/get_attestation")
 ATT_HEX=$(printf '%s' "$ATT_RESP" | jq -r '.raw_cbor_hex // empty')
 if [ -z "$ATT_HEX" ] || [ "$ATT_HEX" = "null" ]; then
     echo "ERROR: /get_attestation did not return raw_cbor_hex" >&2
@@ -159,7 +162,7 @@ else
     if [ -n "${SIDECAR_SECRET:-}" ]; then
         echo ""
         echo "Pushing enclave_object_id to running coordinator..."
-        PUSH_RESP=$(curl -sf -X POST "${COORDINATOR_URL}/v1/admin/set-enclave-id" \
+        PUSH_RESP=$(curl -sf $CURL_INSECURE -X POST "${COORDINATOR_URL}/v1/admin/set-enclave-id" \
             -H 'content-type: application/json' \
             -H "x-sidecar-secret: ${SIDECAR_SECRET}" \
             -d "{\"enclave_object_id\":\"$ENCLAVE_OBJECT_ID\",\"tx_digest\":\"$REG_DIGEST\"}" \

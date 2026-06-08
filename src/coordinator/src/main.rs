@@ -154,7 +154,8 @@ async fn run() -> Result<()> {
     }
 
     // ── TLS setup ──────────────────────────────────────────────────────────
-    // rustls 0.23 requires an explicit crypto provider.
+    // rustls 0.23 requires an explicit crypto provider. Install ring once
+    // before any TLS operations; safe to call multiple times.
     rustls::crypto::ring::default_provider().install_default().ok();
 
     let san_ips: Vec<String> = std::env::var("PINAIVU_TLS_SAN_IPS")

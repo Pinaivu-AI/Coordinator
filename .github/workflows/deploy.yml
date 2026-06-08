@@ -385,25 +385,29 @@ jobs:
           set -e
           # Give the coordinator time to: load env, generate keypair, build
           # libp2p swarm, bind both VSOCK listeners. Realistic startup ~10s.
+          # -k: skip cert verification — coordinator serves a self-signed cert
+          #     generated inside the enclave; clients verify via tls_cert_fingerprint
+          #     in /enclave_health cross-checked against the attestation document.
+          CURL="curl -sk"
           sleep 10
           for i in $(seq 1 24); do
-            if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
+            if $CURL https://localhost:4000/health > /dev/null 2>&1; then
               echo "Health check passed"
               echo "--- /health ---"
-              curl -s http://localhost:4000/health
+              $CURL https://localhost:4000/health
               echo
               echo "--- /enclave_health ---"
-              curl -s http://localhost:4000/enclave_health | jq .
+              $CURL https://localhost:4000/enclave_health | jq .
               echo "--- /get_attestation ---"
-              curl -s http://localhost:4000/get_attestation | jq '{pcr0, pcr1, pcr2, public_key, timestamp_ms, cbor_len: (.raw_cbor_hex | length)}'
+              $CURL https://localhost:4000/get_attestation | jq '{pcr0, pcr1, pcr2, public_key, timestamp_ms, cbor_len: (.raw_cbor_hex | length)}'
 
               # Stability check — earlier deploys sometimes passed the
               # initial probe and then the coordinator silently died.
               # Re-poll after 60s; if uptime didn't climb, fail loud.
-              FIRST_UPTIME=$(curl -s http://localhost:4000/enclave_health | jq .uptime_ms)
+              FIRST_UPTIME=$($CURL https://localhost:4000/enclave_health | jq .uptime_ms)
               echo "Uptime at first probe: ${FIRST_UPTIME} ms"
               sleep 60
-              SECOND=$(curl -s http://localhost:4000/enclave_health 2>/dev/null | jq .uptime_ms)
+              SECOND=$($CURL https://localhost:4000/enclave_health 2>/dev/null | jq .uptime_ms)
               echo "Uptime after 60s:       ${SECOND} ms"
               if [ -z "$SECOND" ] || [ "$SECOND" = "null" ]; then
                 echo "ERROR: coordinator died between initial probe and 60s recheck"

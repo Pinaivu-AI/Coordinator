@@ -51,6 +51,7 @@ fn bid(peer: &str, price: u64, latency: u32, reputation: f32) -> InferenceBid {
         reputation,
         payout_address: format!("0x{:0>62}", peer),
         http_endpoint: format!("http://node-{peer}.test:5000"),
+        node_x25519_pubkey: None,
     }
 }
 
