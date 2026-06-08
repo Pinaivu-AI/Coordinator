@@ -41,6 +41,12 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    // Load .env.dev (or .env) if present — silently ignored in production
+    // where env vars arrive via VSOCK:7000. Lets developers run the
+    // coordinator with `cargo run` without exporting vars manually.
+    let _ = dotenvy::from_filename(".env.dev")
+        .or_else(|_| dotenvy::dotenv());
+
     eprintln!("CHK 01 main entered");
     observability::init();
     eprintln!("CHK 02 observability init");
