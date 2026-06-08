@@ -7,12 +7,13 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use super::types::{NanoX, NodePeerId, RequestId};
+use super::types::{NanoX, NodePeerId, RequestId, SessionId};
 use super::VerifyError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchToken {
     pub request_id: RequestId,
+    pub session_id: SessionId,
     pub client_pubkey: [u8; 32],
     pub primary_peer_id: NodePeerId,
     pub settlement_id: String,
@@ -36,6 +37,7 @@ impl DispatchToken {
         #[derive(Serialize)]
         struct Canonical<'a> {
             request_id: &'a RequestId,
+            session_id: &'a SessionId,
             client_pubkey: &'a [u8; 32],
             primary_peer_id: &'a NodePeerId,
             settlement_id: &'a String,
@@ -47,6 +49,7 @@ impl DispatchToken {
         }
         let canonical = Canonical {
             request_id: &self.request_id,
+            session_id: &self.session_id,
             client_pubkey: &self.client_pubkey,
             primary_peer_id: &self.primary_peer_id,
             settlement_id: &self.settlement_id,
@@ -90,6 +93,7 @@ mod tests {
     fn sample() -> DispatchToken {
         DispatchToken {
             request_id: uuid::Uuid::nil(),
+            session_id: uuid::Uuid::nil(),
             client_pubkey: [3u8; 32],
             primary_peer_id: NodePeerId("12D3KooWPrimary".into()),
             settlement_id: "free".into(),
