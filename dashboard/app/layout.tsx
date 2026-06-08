@@ -27,6 +27,9 @@ export default function RootLayout({
             <NavLink href="/keys"   label="API Keys" />
             <NavLink href="/usage"  label="Usage" />
             <NavLink href="/models" label="Models" />
+            <div className="mt-auto pt-4 border-t border-gray-800">
+              <NavLink href="/setup" label="Setup" />
+            </div>
           </aside>
 
           {/* Main */}
