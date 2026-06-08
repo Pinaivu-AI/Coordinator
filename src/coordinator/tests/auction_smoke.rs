@@ -10,7 +10,7 @@ use std::time::Duration;
 use coordinator::app::AppState;
 use coordinator::mesh::InMemoryMesh;
 use coordinator::protocol::{InferenceBid, NanoX, NodePeerId};
-use coordinator::{bind, build_router};
+use coordinator::{bind, build_router_no_auth as build_router};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;

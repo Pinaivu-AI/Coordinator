@@ -1,9 +1,4 @@
 //! Coordinator configuration loaded from environment.
-//!
-//! Inside the enclave these are populated via the VSOCK:7000 config
-//! push at boot; locally they come from a `.env` file or the shell.
-//! All persistence URLs are required — the coordinator refuses to
-//! start without durable storage.
 
 use anyhow::Context;
 
@@ -13,15 +8,11 @@ pub struct Config {
     pub bind_addr: String,
     /// libp2p multiaddr the mesh listens on. Default `/ip4/0.0.0.0/tcp/0`.
     pub libp2p_listen: String,
-    /// Postgres URL — receipts, dispatch jobs, payments. In prod the
-    /// VSOCK:8101 socat bridge forwards this to Supabase.
     pub database_url: String,
-    /// Redis URL — replay nonces and short-lived hot caches. In prod
-    /// the VSOCK:8102 socat bridge forwards this to Upstash.
     pub redis_url: String,
     /// PEM-encoded TLS certificate. If both `tls_cert_pem` and
     /// `tls_key_pem` are set the server binds HTTPS; otherwise a
-    /// self-signed certificate is generated at boot.
+    /// self-signed certificate is generated at boot inside the enclave.
     pub tls_cert_pem: Option<String>,
     /// PEM-encoded TLS private key matching `tls_cert_pem`.
     pub tls_key_pem: Option<String>,

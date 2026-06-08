@@ -3,6 +3,7 @@ Cargo.lock
 .env
 .env.*
 !.env.example
+!.env.dev.example
 *.swp
 .DS_Store
 *.eif

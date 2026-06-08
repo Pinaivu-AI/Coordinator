@@ -1,9 +1,9 @@
 //! Pinaivu Coordinator — entry point.
 //!
 //! Generates a single `EnclaveKeyPair` and shares it across the libp2p
-//! swarm (used to derive PeerId), the HTTP signing layer, and the
+//! swarm (used to derive PeerId), the HTTP signing key, and the
 //! routing-receipt signer. Connects Postgres + Redis, spawns the
-//! apalis deadline watcher alongside the libp2p mesh and the HTTP
+//! apalis deadline watcher alongside the libp2p mesh and the HTTPS
 //! server, then waits on `ctrl-c` for graceful shutdown.
 
 use std::sync::Arc;
@@ -11,8 +11,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use rustls;
-use sha2::Digest;
 use coordinator::{
     app,
     generate_self_signed_tls,
@@ -26,10 +24,9 @@ use coordinator::{
     settlement::{free::FreeSettlement, SettlementAdapter},
 };
 use nautilus_enclave::EnclaveKeyPair;
+use sha2::Digest;
 use tokio::sync::RwLock;
 
-/// How long the in-enclave peer registry holds entries between
-/// gossip announcements before eviction.
 const PEER_TTL: Duration = Duration::from_secs(600);
 
 #[tokio::main]
@@ -44,13 +41,20 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    // Load .env.dev (or .env) if present — silently ignored in production
+    // where env vars arrive via VSOCK:7000. Lets developers run the
+    // coordinator with `cargo run` without exporting vars manually.
+    let _ = dotenvy::from_filename(".env.dev")
+        .or_else(|_| dotenvy::dotenv());
+
     eprintln!("CHK 01 main entered");
     observability::init();
     eprintln!("CHK 02 observability init");
 
     let cfg = app::Config::from_env()?;
     eprintln!(
-        "CHK 03 config loaded: database_url_len={} redis_url_len={}",
+        "CHK 03 config loaded: bind={} database_url_len={} redis_url_len={}",
+        cfg.bind_addr,
         cfg.database_url.len(),
         cfg.redis_url.len()
     );
@@ -70,26 +74,19 @@ async fn run() -> Result<()> {
     tracing::info!("postgres connected; migrations applied");
 
     eprintln!("CHK 07 connecting redis…");
-    let _redis = r::connect(&cfg.redis_url).await.context("connect redis")?;
+    let redis_conn = r::connect(&cfg.redis_url).await.context("connect redis")?;
     eprintln!("CHK 08 redis connected");
     tracing::info!("redis connected (PONG)");
 
     // ── Apalis deadline-watcher worker ─────────────────────────────────────
-    // Watches `dispatch_jobs` for deadline-elapsed entries with no
-    // CompletionAck and fires the settlement refund path.
     let job_store = PgJobStore::new(pg_pool.clone())
         .await
         .context("init apalis job store")?;
     let settlement: Arc<dyn SettlementAdapter> = Arc::new(FreeSettlement);
-    let _worker_handle =
-        spawn_dispatch_worker(&job_store, pg_pool.clone(), settlement);
+    let _worker_handle = spawn_dispatch_worker(&job_store, pg_pool.clone(), settlement);
     tracing::info!("apalis dispatch-timeout worker spawned");
 
     // ── Settlement worker ──────────────────────────────────────────────────
-    // Drains `pending` payment rows and submits vault::settle PTBs via
-    // the in-enclave sidecar. Only spawned when the sidecar is reachable.
-    // `settlement_tx` is passed into the mesh event loop so it can trigger
-    // the worker immediately after inserting payment rows.
     let settlement_tx: Option<tokio::sync::mpsc::Sender<coordinator::jobs::settlement_worker::SettlementJob>> =
         match SidecarClient::from_env() {
             Ok(sidecar) => {
@@ -100,9 +97,6 @@ async fn run() -> Result<()> {
                 let handle = spawn_settlement_worker(pg_pool.clone(), Arc::new(sidecar), storage.clone());
                 tracing::info!("apalis settlement worker spawned");
                 let _worker_handle = handle;
-
-                // Channel bridges the event loop (which can't hold apalis storage directly)
-                // to a background task that pushes jobs into the apalis Postgres queue.
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<SettlementJob>(64);
                 let mut push_storage = storage;
                 tokio::spawn(async move {
@@ -145,11 +139,7 @@ async fn run() -> Result<()> {
         tracing::info!(libp2p_addr = %addr, "mesh listening");
     }
 
-    // ── On-chain registration via the colocated sidecar ───────────────────
-    // Asks the TS sidecar to register this enclave on Sui so any
-    // receipts we sign will verify under pinaivu::enclave. Warning-on-
-    // fail with background retry; inference doesn't depend on this
-    // (payouts will fail to settle on-chain until registration lands).
+    // ── On-chain registration ──────────────────────────────────────────────
     let on_chain_state = Arc::new(RwLock::new(None::<RegisteredEnclave>));
     match SidecarClient::from_env() {
         Ok(sidecar) => {
@@ -157,8 +147,7 @@ async fn run() -> Result<()> {
             match nautilus_enclave::get_attestation(&pubkey, &[]) {
                 Ok(doc) => {
                     if let Ok(att_bytes) = hex::decode(&doc.raw_cbor_hex) {
-                        let att_b64 = base64::engine::general_purpose::STANDARD
-                            .encode(&att_bytes);
+                        let att_b64 = base64::engine::general_purpose::STANDARD.encode(&att_bytes);
                         spawn_registration(sidecar, att_b64, on_chain_state.clone());
                     } else {
                         tracing::warn!("attestation raw_cbor_hex is not valid hex; skipping registration");
@@ -185,18 +174,16 @@ async fn run() -> Result<()> {
     let (tls_config, tls_fingerprint) = if cfg.has_tls_certs() {
         let cert_pem = cfg.tls_cert_pem.unwrap().into_bytes();
         let key_pem  = cfg.tls_key_pem.unwrap().into_bytes();
-        // Parse the first DER cert out of the PEM to compute its fingerprint.
-        let fp = cert_fingerprint_from_pem(&cert_pem)
-            .unwrap_or_else(|| "unknown".into());
-        eprintln!("CHK 04.1 using operator-supplied TLS cert; fingerprint={fp}");
+        let fp = cert_fingerprint_from_pem(&cert_pem).unwrap_or_else(|| "unknown".into());
+        eprintln!("CHK 09 using operator TLS cert; fingerprint={fp}");
         (make_tls_config(cert_pem, key_pem).await?, fp)
     } else {
-        eprintln!("CHK 04.1 generating self-signed TLS cert (no PINAIVU_TLS_CERT set)");
+        eprintln!("CHK 09 generating self-signed TLS cert");
         generate_self_signed_tls(&san_ips).await?
     };
-    eprintln!("CHK 04.2 TLS config ready; fingerprint={tls_fingerprint}");
+    eprintln!("CHK 10 TLS ready; fingerprint={tls_fingerprint}");
 
-    // ── HTTP server ────────────────────────────────────────────────────────
+    // ── Build AppState ─────────────────────────────────────────────────────
     let state = app::AppState::with_full_archive_and_chain(
         enclave_key,
         mesh_handle.mesh.clone(),
@@ -205,10 +192,12 @@ async fn run() -> Result<()> {
         on_chain_state,
     );
     state.set_pg_pool(pg_pool.clone()).await;
+    state.set_redis(redis_conn).await;
     state.set_tls_cert_fingerprint(tls_fingerprint).await;
 
+    // ── HTTPS server ───────────────────────────────────────────────────────
     let bind_addr: std::net::SocketAddr = cfg.bind_addr.parse()
-        .map_err(|e| anyhow::anyhow!("invalid PINAIVU_BIND address: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid PINAIVU_BIND: {e}"))?;
 
     tracing::info!(listening = %bind_addr, "coordinator https ready");
 
@@ -236,9 +225,7 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
-/// Extract the SHA-256 fingerprint of the first certificate in a PEM block.
-/// Strips the header/footer lines, base64-decodes the body to get the DER,
-/// and hashes it — no extra crate needed.
+/// SHA-256 fingerprint of the first DER cert in a PEM block.
 fn cert_fingerprint_from_pem(pem: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(pem).ok()?;
     let b64: String = text

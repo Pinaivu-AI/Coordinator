@@ -19,7 +19,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use coordinator::app::AppState;
 use coordinator::mesh::InMemoryMesh;
 use coordinator::protocol::{InferenceBid, NanoX, NodePeerId};
-use coordinator::{bind, build_router};
+use coordinator::{bind, build_router_no_auth as build_router};
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use serde_json::json;

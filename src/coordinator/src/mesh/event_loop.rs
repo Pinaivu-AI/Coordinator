@@ -26,6 +26,7 @@ use super::behaviour::{PinaivuBehaviour, PinaivuBehaviourEvent};
 use super::completion_proto::{CompletionAck, CompletionResponse};
 use super::peer_registry::PeerRegistry;
 use super::topics::{ANNOUNCE, BIDS, INFERENCE_ANY, REPUTATION};
+use crate::api::usage;
 use crate::jobs::settlement_worker::SettlementJob;
 use crate::payments;
 use crate::protocol::{
@@ -368,6 +369,21 @@ impl EventLoop {
                     }
                 }
             }
+
+            // Back-fill token counts + cost into api_usage now that we have
+            // the completed proof set. Sum across all contributing nodes.
+            let input_tokens:  i32 = ack.proofs.iter().map(|p| p.input_tokens  as i32).sum();
+            let output_tokens: i32 = ack.proofs.iter().map(|p| p.output_tokens as i32).sum();
+            let total_cost:    i64 = payout_lines.iter().map(|l| l.amount_nanox as i64).sum();
+            let latency_ms:    i32 = ack.proofs.first()
+                .map(|p| p.latency_ms as i32)
+                .unwrap_or(0);
+
+            let pool2 = pool.clone();
+            let req_id = ack.request_id;
+            tokio::spawn(async move {
+                usage::update_completion(&pool2, req_id, input_tokens, output_tokens, total_cost, latency_ms).await;
+            });
         }
 
         let _ = self

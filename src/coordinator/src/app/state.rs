@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nautilus_enclave::EnclaveKeyPair;
+use redis::aio::ConnectionManager as RedisConn;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
@@ -15,9 +16,6 @@ use crate::mesh::{Mesh, NoopMesh, PeerRegistry};
 use crate::onchain::RegisteredEnclave;
 use crate::receipts::{InMemoryReceiptArchive, ReceiptArchive};
 
-/// How long an un-refreshed peer stays in the in-enclave registry
-/// before being evicted. Five times the default announce interval —
-/// gives plenty of slack for a single missed broadcast.
 const DEFAULT_PEER_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
@@ -26,22 +24,22 @@ pub struct AppState {
 }
 
 struct Inner {
-    enclave_key: Arc<EnclaveKeyPair>,
-    mesh: Arc<dyn Mesh>,
-    peer_registry: Arc<PeerRegistry>,
-    receipt_archive: Arc<dyn ReceiptArchive>,
-    on_chain: Arc<RwLock<Option<RegisteredEnclave>>>,
-    pg_pool: RwLock<Option<PgPool>>,
-    started_at_ms: u64,
+    enclave_key:          Arc<EnclaveKeyPair>,
+    mesh:                 Arc<dyn Mesh>,
+    peer_registry:        Arc<PeerRegistry>,
+    receipt_archive:      Arc<dyn ReceiptArchive>,
+    on_chain:             Arc<RwLock<Option<RegisteredEnclave>>>,
+    pg_pool:              RwLock<Option<PgPool>>,
+    started_at_ms:        u64,
     /// SHA-256 fingerprint (hex) of the TLS certificate in use.
-    /// Set once after the server binds; `None` until then or when
-    /// running without TLS (tests / plain-HTTP mode).
+    /// Set once after the server binds; `None` in tests / plain-HTTP mode.
     tls_cert_fingerprint: RwLock<Option<String>>,
+    /// Multiplexed Redis connection for rate limiting and short-lived caches.
+    /// Set once after boot; `None` in tests that don't inject Redis.
+    redis:                RwLock<Option<RedisConn>>,
 }
 
 impl AppState {
-    /// New state with a freshly-generated keypair, a `NoopMesh`, and
-    /// an empty `PeerRegistry`. Convenience for tests and dev.
     pub fn new() -> Self {
         Self::with_full(
             Arc::new(EnclaveKeyPair::generate()),
@@ -50,8 +48,6 @@ impl AppState {
         )
     }
 
-    /// New state with an explicit mesh; keypair and peer registry are
-    /// generated. Used by tests that inject an `InMemoryMesh`.
     pub fn with_mesh(mesh: Arc<dyn Mesh>) -> Self {
         Self::with_full(
             Arc::new(EnclaveKeyPair::generate()),
@@ -60,8 +56,6 @@ impl AppState {
         )
     }
 
-    /// New state with an explicit mesh and peer registry; the enclave
-    /// keypair is generated. Backward-compatible with existing tests.
     pub fn with_mesh_and_registry(
         mesh: Arc<dyn Mesh>,
         peer_registry: Arc<PeerRegistry>,
@@ -73,12 +67,6 @@ impl AppState {
         )
     }
 
-    /// Fully-explicit constructor — used by `main.rs` so the libp2p
-    /// identity, the HTTP signing key, and the routing-receipt signing
-    /// key are all the same `EnclaveKeyPair`. Defaults to an in-memory
-    /// receipt archive; pass an explicit one via [`with_full_archive`]
-    /// for prod (Postgres) or tests that share the archive with a
-    /// libp2p event loop.
     pub fn with_full(
         enclave_key: Arc<EnclaveKeyPair>,
         mesh: Arc<dyn Mesh>,
@@ -92,8 +80,6 @@ impl AppState {
         )
     }
 
-    /// Like [`with_full`] but takes an explicit receipt archive so the
-    /// HTTP layer and the mesh event loop share the same store.
     pub fn with_full_archive(
         enclave_key: Arc<EnclaveKeyPair>,
         mesh: Arc<dyn Mesh>,
@@ -109,8 +95,6 @@ impl AppState {
         )
     }
 
-    /// Full constructor used by `main.rs`; threads the on-chain
-    /// registration cell through to `/enclave_health`.
     pub fn with_full_archive_and_chain(
         enclave_key: Arc<EnclaveKeyPair>,
         mesh: Arc<dyn Mesh>,
@@ -129,21 +113,41 @@ impl AppState {
                 peer_registry,
                 receipt_archive,
                 on_chain,
-                pg_pool: RwLock::new(None),
+                pg_pool:              RwLock::new(None),
                 started_at_ms,
                 tls_cert_fingerprint: RwLock::new(None),
+                redis:                RwLock::new(None),
             }),
         }
     }
 
-    /// Attach a Postgres pool after construction so admin endpoints can
-    /// inspect persistent state (payments, dispatch_jobs, etc).
+    // ── Setters ──────────────────────────────────────────────────────────────
+
     pub async fn set_pg_pool(&self, pool: PgPool) {
         *self.inner.pg_pool.write().await = Some(pool);
     }
 
+    pub async fn set_tls_cert_fingerprint(&self, fingerprint: String) {
+        *self.inner.tls_cert_fingerprint.write().await = Some(fingerprint);
+    }
+
+    pub async fn set_redis(&self, conn: RedisConn) {
+        *self.inner.redis.write().await = Some(conn);
+    }
+
+    // ── Getters ──────────────────────────────────────────────────────────────
+
     pub async fn pg_pool(&self) -> Option<PgPool> {
         self.inner.pg_pool.read().await.clone()
+    }
+
+    pub async fn tls_cert_fingerprint(&self) -> Option<String> {
+        self.inner.tls_cert_fingerprint.read().await.clone()
+    }
+
+    /// Returns a cloned `ConnectionManager` (cheap — backed by an Arc).
+    pub async fn redis(&self) -> Option<RedisConn> {
+        self.inner.redis.read().await.clone()
     }
 
     pub fn enclave_key(&self) -> &EnclaveKeyPair {
@@ -184,14 +188,6 @@ impl AppState {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         now_ms.saturating_sub(self.inner.started_at_ms)
-    }
-
-    pub async fn set_tls_cert_fingerprint(&self, fingerprint: String) {
-        *self.inner.tls_cert_fingerprint.write().await = Some(fingerprint);
-    }
-
-    pub async fn tls_cert_fingerprint(&self) -> Option<String> {
-        self.inner.tls_cert_fingerprint.read().await.clone()
     }
 }
 
