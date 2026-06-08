@@ -27,12 +27,31 @@ pub enum PrivacyLevel {
     Maximum,
 }
 
+/// Whether the client wants the coordinator to mint a fresh session or
+/// continue an existing one. Carried on `InferenceRequest` so nodes can
+/// distinguish a cold-start turn (no Walrus/Postgres fetch needed) from
+/// a continuation (full context-layer pull).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClientSessionIntent {
+    New,
+    Continue,
+}
+
+impl Default for ClientSessionIntent {
+    fn default() -> Self {
+        ClientSessionIntent::New
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceRequest {
     pub request_id: RequestId,
     pub session_id: SessionId,
     pub model: String,
     pub privacy: PrivacyLevel,
+    #[serde(default)]
+    pub session_intent: ClientSessionIntent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

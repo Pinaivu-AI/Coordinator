@@ -66,6 +66,10 @@ struct InFlightMeta {
     bid_set_hash: [u8; 32],
     /// peer_id → Sui payout address, from winning bid + helper bids.
     payout_addresses: HashMap<String, String>,
+    /// Session this request belongs to. Used by the completion handler
+    /// to upsert `node_session_cache` so future auctions can prefer
+    /// the warm node.
+    session_id: Uuid,
 }
 
 pub struct EventLoop {
@@ -252,6 +256,7 @@ impl EventLoop {
         let meta = self.in_flight.remove(&ack.request_id);
         let client_id = meta.as_ref().map(|m| m.client_id.as_str()).unwrap_or("").to_string();
         let bid_set_hash = meta.as_ref().map(|m| m.bid_set_hash).unwrap_or([0u8; 32]);
+        let session_id = meta.as_ref().map(|m| m.session_id);
         let payout_addresses = meta
             .map(|m| m.payout_addresses)
             .unwrap_or_default();
@@ -311,6 +316,37 @@ impl EventLoop {
         }
 
         tracing::info!(request_id = %ack.request_id, "routing receipt signed and stored");
+
+        // Mark every contributing node as warm for this session so the
+        // next auction can route the user back here. Upsert because
+        // the same (peer, session) pair may already be warm from an
+        // earlier turn — we just refresh `last_served_at` to NOW().
+        if let (Some(pool), Some(sid)) = (&self.pg_pool, session_id) {
+            let mut all_peers = vec![receipt.primary_peer_id.0.clone()];
+            all_peers.extend(receipt.helper_peer_ids.iter().map(|p| p.0.clone()));
+            for peer in &all_peers {
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO node_session_cache
+                        (node_peer_id, session_id, last_served_at, cache_tier)
+                     VALUES ($1, $2, NOW(), 'gpu')
+                     ON CONFLICT (node_peer_id, session_id) DO UPDATE SET
+                        last_served_at = NOW(),
+                        cache_tier     = 'gpu'",
+                )
+                .bind(peer)
+                .bind(sid)
+                .execute(pool)
+                .await
+                {
+                    tracing::warn!(
+                        request_id = %ack.request_id,
+                        peer,
+                        err = %e,
+                        "node_session_cache upsert failed"
+                    );
+                }
+            }
+        }
 
         // Persist payment rows and enqueue a settlement job.
         if let Some(pool) = &self.pg_pool {
@@ -423,6 +459,7 @@ impl EventLoop {
                 client_id: String::new(),
                 bid_set_hash: [0u8; 32],
                 payout_addresses: HashMap::new(),
+                session_id: request.session_id,
             },
         );
 

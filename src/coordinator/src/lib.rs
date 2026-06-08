@@ -30,8 +30,6 @@ use axum_server::tls_rustls::RustlsConfig;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
-/// Build the axum router for integration tests — no API key middleware.
-/// Production always uses `build_router`.
 /// Build the axum router without API key auth middleware.
 /// For integration tests — production always uses `build_router`.
 pub fn build_router_no_auth(state: app::AppState) -> Router {
@@ -40,11 +38,12 @@ pub fn build_router_no_auth(state: app::AppState) -> Router {
         .route("/enclave_health",  get(api::health::enclave_health))
         .route("/get_attestation", get(api::health::get_attestation))
         .route("/v1/models",       get(api::models::list_models))
-        .route("/v1/chat/completions",    post(api::inference::chat_completions))
-        .route("/v1/nodes",               get(api::nodes::list_nodes))
-        .route("/v1/proofs/{request_id}", get(api::proofs::get_proof))
+        .route("/v1/chat/completions",               post(api::inference::chat_completions))
+        .route("/v1/nodes",                          get(api::nodes::list_nodes))
+        .route("/v1/proofs/{request_id}",            get(api::proofs::get_proof))
         .route("/v1/admin/set-enclave-id",           post(api::admin::set_enclave_id))
         .route("/v1/admin/settlements/{request_id}", get(api::admin::settlement_status))
+        .route("/v1/admin/sessions/{session_id}",    get(api::admin::session_status))
         .with_state(state)
 }
 
@@ -78,6 +77,7 @@ pub fn build_router(state: app::AppState) -> Router {
     let admin = Router::new()
         .route("/v1/admin/set-enclave-id",           post(api::admin::set_enclave_id))
         .route("/v1/admin/settlements/{request_id}", get(api::admin::settlement_status))
+        .route("/v1/admin/sessions/{session_id}",    get(api::admin::session_status))
         .route("/v1/accounts",                       post(api::keys::create_account))
         .route("/v1/keys",                           post(api::keys::create_key))
         .route("/v1/keys",                           get(api::keys::list_keys))

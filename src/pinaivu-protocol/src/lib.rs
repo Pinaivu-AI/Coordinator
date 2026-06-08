@@ -12,8 +12,8 @@ pub use dispatch_token::DispatchToken;
 pub use proof::ProofOfInference;
 pub use routing_receipt::{Payout, RoutingReceipt};
 pub use types::{
-    InferenceBid, InferenceRequest, NanoX, NodeCapabilities, NodePeerId, PrivacyLevel,
-    RequestId, SessionId,
+    ClientSessionIntent, InferenceBid, InferenceRequest, NanoX, NodeCapabilities, NodePeerId,
+    PrivacyLevel, RequestId, SessionId,
 };
 
 /// Errors returned by `verify()` on any signed protocol artefact.
