@@ -68,6 +68,7 @@ pub fn build_router(state: app::AppState) -> Router {
         .route("/v1/chat/completions",    post(api::inference::chat_completions))
         .route("/v1/nodes",               get(api::nodes::list_nodes))
         .route("/v1/proofs/{request_id}", get(api::proofs::get_proof))
+        .route("/v1/usage",               get(api::usage::get_usage))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_api_key,
