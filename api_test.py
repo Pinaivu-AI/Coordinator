@@ -61,10 +61,12 @@ def check(label, ok, detail=""):
     return ok
 
 
-def get(path, key=None):
+def get(path, key=None, admin=False):
     headers = {}
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    if admin:
+        headers["x-sidecar-secret"] = SECRET
     req = urllib.request.Request(f"{BASE}{path}", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10, context=CTX) as r:
@@ -164,7 +166,7 @@ else:
 
 # ── Test 5: list keys ─────────────────────────────────────────────────────────
 print("\n── 5. GET /v1/keys ──────────────────────────────────────────────────────")
-s5, keys = get(f"/v1/keys?account_id={ACCOUNT_ID}")
+s5, keys = get(f"/v1/keys?account_id={ACCOUNT_ID}", admin=True)
 check("HTTP 200",         s5 == 200,            f"got {s5}")
 check("key appears in list", any(k["id"] == KEY_ID for k in (keys if isinstance(keys, list) else [])))
 

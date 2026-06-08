@@ -3,26 +3,31 @@
 import { useState } from "react";
 
 export default function CreateKeyForm({ accountId }: { accountId: string }) {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [rpm, setRpm] = useState(60);
-  const [daily, setDaily] = useState(1000);
+  const [open, setOpen]     = useState(false);
+  const [name, setName]     = useState("");
   const [result, setResult] = useState<{ key: string; key_prefix: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError]   = useState("");
+  const [copied, setCopied] = useState(false);
 
   async function handleCreate() {
+    if (!name.trim()) { setError("Give your key a name first."); return; }
     setLoading(true);
     setError("");
     try {
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ account_id: accountId, name, rpm_limit: rpm, daily_limit: daily }),
+        body: JSON.stringify({
+          account_id:  accountId,
+          name:        name.trim(),
+          // Limits are tier-based — not exposed to users.
+          rpm_limit:   60,
+          daily_limit: 10000,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setResult(data);
+      setResult(await res.json());
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -30,72 +35,78 @@ export default function CreateKeyForm({ accountId }: { accountId: string }) {
     }
   }
 
+  function copyKey() {
+    if (!result) return;
+    navigator.clipboard.writeText(result.key);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  function dismiss() {
+    setResult(null);
+    setOpen(false);
+    setName("");
+    window.location.reload();
+  }
+
+  // ── After creation: show the raw key once ────────────────────────────────────
   if (result) {
     return (
-      <div className="bg-green-900/30 border border-green-700 rounded-lg px-5 py-4 max-w-lg">
-        <p className="text-sm text-green-300 font-medium mb-2">
+      <div className="bg-gray-900 border border-green-800 rounded-xl px-5 py-4 max-w-md">
+        <p className="text-sm font-medium text-green-400 mb-3">
           Key created — copy it now, it won&apos;t be shown again.
         </p>
-        <code className="block bg-gray-950 rounded px-3 py-2 text-xs font-mono text-green-200 break-all mb-3">
-          {result.key}
-        </code>
-        <button
-          onClick={() => { setResult(null); setOpen(false); setName(""); window.location.reload(); }}
-          className="text-xs text-gray-400 hover:text-white"
-        >
+        <div className="flex items-center gap-2 mb-3">
+          <code className="flex-1 bg-gray-950 rounded px-3 py-2 text-xs font-mono text-green-200 break-all">
+            {result.key}
+          </code>
+          <button
+            onClick={copyKey}
+            className="shrink-0 px-3 py-2 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded transition-colors"
+          >
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+        <button onClick={dismiss} className="text-xs text-gray-500 hover:text-gray-300">
           Done
         </button>
       </div>
     );
   }
 
+  // ── Create button + inline form ───────────────────────────────────────────────
   if (!open) {
     return (
       <button
         onClick={() => setOpen(true)}
         className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-lg transition-colors"
       >
-        + New key
+        + Create key
       </button>
     );
   }
 
   return (
-    <div className="bg-gray-900 border border-gray-700 rounded-lg px-5 py-4 w-80">
-      <p className="text-sm font-medium mb-3">New API key</p>
-
-      <label className="block text-xs text-gray-400 mb-1">Name (optional)</label>
+    <div className="flex items-center gap-3">
       <input
+        autoFocus
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="e.g. production"
-        className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white mb-3 outline-none focus:border-indigo-500"
+        onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+        placeholder="Key name  e.g. production, test"
+        className="w-56 bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none"
       />
-
-      <div className="flex gap-3 mb-4">
-        <div className="flex-1">
-          <label className="block text-xs text-gray-400 mb-1">RPM limit</label>
-          <input type="number" value={rpm} onChange={(e) => setRpm(Number(e.target.value))} min={1}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white outline-none focus:border-indigo-500" />
-        </div>
-        <div className="flex-1">
-          <label className="block text-xs text-gray-400 mb-1">Daily limit</label>
-          <input type="number" value={daily} onChange={(e) => setDaily(Number(e.target.value))} min={1}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white outline-none focus:border-indigo-500" />
-        </div>
-      </div>
-
-      {error && <p className="text-xs text-red-400 mb-2">{error}</p>}
-
-      <div className="flex gap-2">
-        <button onClick={handleCreate} disabled={loading}
-          className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors">
-          {loading ? "Creating…" : "Create"}
-        </button>
-        <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-gray-400 hover:text-white">
-          Cancel
-        </button>
-      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      <button
+        onClick={handleCreate}
+        disabled={loading}
+        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors"
+      >
+        {loading ? "Creating…" : "Create"}
+      </button>
+      <button onClick={() => setOpen(false)} className="text-sm text-gray-500 hover:text-gray-300">
+        Cancel
+      </button>
     </div>
   );
 }
