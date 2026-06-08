@@ -5,3 +5,4 @@ pub mod keys;
 pub mod models;
 pub mod nodes;
 pub mod proofs;
+pub mod usage;
