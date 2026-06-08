@@ -42,7 +42,9 @@ use x25519_dalek::PublicKey as X25519PublicKey;
 
 use crate::app::AppState;
 use crate::app::AppError;
-use crate::marketplace::auction::{collect_bids, pick_winner, DEFAULT_AUCTION_WINDOW};
+use crate::marketplace::auction::{
+    collect_bids, fetch_warmth_map, pick_winner_with_warmth, DEFAULT_AUCTION_WINDOW,
+};
 use crate::protocol::{
     ClientSessionIntent, DispatchToken, InferenceRequest, NanoX, PrivacyLevel,
 };
@@ -128,7 +130,12 @@ pub async fn chat_completions(
         })?;
 
     let bids = collect_bids(rx, DEFAULT_AUCTION_WINDOW).await;
-    let winner = pick_winner(&bids)
+    // Warmth lookup: which nodes already have this session's KV/blob
+    // cached locally? Empty for new sessions and stateless deployments;
+    // the auction stays competitive on price + latency + reputation.
+    let pool = state.pg_pool().await;
+    let warmth = fetch_warmth_map(pool.as_ref(), session_id).await;
+    let winner = pick_winner_with_warmth(&bids, &warmth)
         .ok_or_else(|| AppError::NoNodes("auction closed with no bids".into()))?;
 
     // Record peer_id → Sui payout address for every bidder so the

@@ -48,6 +48,10 @@ pub fn build_router(state: app::AppState) -> Router {
             "/v1/admin/settlements/{request_id}",
             get(api::admin::settlement_status),
         )
+        .route(
+            "/v1/admin/sessions/{session_id}",
+            get(api::admin::session_status),
+        )
         .with_state(state)
 }
 

@@ -220,6 +220,161 @@ pub async fn settlement_status(
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct SessionTurnRow {
+    pub turn_id: String,
+    pub request_id: String,
+    pub node_peer_id: Option<String>,
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
+    pub latency_ms: Option<i32>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WarmNodeRow {
+    pub node_peer_id: String,
+    pub cache_tier: String,
+    pub last_served_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionStatusResp {
+    pub session_id: String,
+    pub user_address: String,
+    pub model_id: String,
+    pub turn_count: i32,
+    pub total_tokens: i64,
+    pub walrus_blob_id: Option<String>,
+    pub prev_blob_id: Option<String>,
+    pub last_updated: String,
+    pub turns: Vec<SessionTurnRow>,
+    pub warm_nodes: Vec<WarmNodeRow>,
+}
+
+/// Inspect a chat session — its current Walrus blob, recent turns, and
+/// the list of nodes that are still warm for it. Used to debug context
+/// continuity across nodes.
+pub async fn session_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err((code, body)) = check_secret(&headers) {
+        return (code, body).into_response();
+    }
+
+    let sid = match Uuid::parse_str(&session_id) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "session_id is not a uuid"})),
+            )
+                .into_response();
+        }
+    };
+
+    let pool = match state.pg_pool().await {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "pg pool not attached"})),
+            )
+                .into_response();
+        }
+    };
+
+    let session = sqlx::query_as::<_, (
+        String, String, i32, i64, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>,
+    )>(
+        "SELECT user_address, model_id, turn_count, total_tokens,
+                walrus_blob_id, prev_blob_id, last_updated
+         FROM sessions WHERE session_id = $1",
+    )
+    .bind(sid)
+    .fetch_optional(&pool)
+    .await;
+
+    let session = match session {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "session not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("query sessions: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let turns = sqlx::query_as::<_, (
+        Uuid, String, Option<String>, Option<i32>, Option<i32>, Option<i32>,
+        chrono::DateTime<chrono::Utc>,
+    )>(
+        "SELECT turn_id, request_id, node_peer_id, input_tokens, output_tokens,
+                latency_ms, created_at
+         FROM turns WHERE session_id = $1
+         ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(sid)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| SessionTurnRow {
+        turn_id: r.0.to_string(),
+        request_id: r.1,
+        node_peer_id: r.2,
+        input_tokens: r.3,
+        output_tokens: r.4,
+        latency_ms: r.5,
+        created_at: r.6.to_rfc3339(),
+    })
+    .collect();
+
+    let warm_nodes = sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>)>(
+        "SELECT node_peer_id, cache_tier, last_served_at
+         FROM node_session_cache WHERE session_id = $1
+         ORDER BY last_served_at DESC",
+    )
+    .bind(sid)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| WarmNodeRow {
+        node_peer_id: r.0,
+        cache_tier: r.1,
+        last_served_at: r.2.to_rfc3339(),
+    })
+    .collect();
+
+    (
+        StatusCode::OK,
+        Json(SessionStatusResp {
+            session_id,
+            user_address: session.0,
+            model_id: session.1,
+            turn_count: session.2,
+            total_tokens: session.3,
+            walrus_blob_id: session.4,
+            prev_blob_id: session.5,
+            last_updated: session.6.to_rfc3339(),
+            turns,
+            warm_nodes,
+        }),
+    )
+        .into_response()
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
