@@ -20,7 +20,7 @@ use coordinator::mesh::{
 };
 use coordinator::receipts::InMemoryReceiptArchive;
 use coordinator::protocol::{InferenceBid, InferenceRequest, NanoX, NodePeerId};
-use coordinator::{bind, build_router};
+use coordinator::{bind, build_router_no_auth as build_router};
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic},

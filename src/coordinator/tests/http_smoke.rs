@@ -5,7 +5,7 @@
 //! returned attestation document carries the same pubkey the enclave
 //! exposes via `/enclave_health`.
 
-use coordinator::{app::AppState, bind, build_router};
+use coordinator::{app::AppState, bind, build_router_no_auth as build_router};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

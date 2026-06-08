@@ -247,5 +247,3 @@ pub async fn create_account(
     }))
 }
 
-// keep hash_api_key accessible for tests
-pub use hash_api_key as hash_key_for_test;

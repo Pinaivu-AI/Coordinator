@@ -17,7 +17,7 @@ use std::sync::Arc;
 use coordinator::app::AppState;
 use coordinator::protocol::{NodePeerId, RoutingReceipt};
 use coordinator::receipts::{InMemoryReceiptArchive, ReceiptArchive};
-use coordinator::{bind, build_router};
+use coordinator::{bind, build_router_no_auth as build_router};
 use nautilus_enclave::EnclaveKeyPair;
 use serde_json::Value;
 use uuid::Uuid;
