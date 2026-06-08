@@ -1,9 +1,4 @@
 //! Coordinator configuration loaded from environment.
-//!
-//! Inside the enclave these are populated via the VSOCK:7000 config
-//! push at boot; locally they come from a `.env` file or the shell.
-//! All persistence URLs are required — the coordinator refuses to
-//! start without durable storage.
 
 use anyhow::Context;
 
@@ -13,12 +8,13 @@ pub struct Config {
     pub bind_addr: String,
     /// libp2p multiaddr the mesh listens on. Default `/ip4/0.0.0.0/tcp/0`.
     pub libp2p_listen: String,
-    /// Postgres URL — receipts, dispatch jobs, payments. In prod the
-    /// VSOCK:8101 socat bridge forwards this to Supabase.
     pub database_url: String,
-    /// Redis URL — replay nonces and short-lived hot caches. In prod
-    /// the VSOCK:8102 socat bridge forwards this to Upstash.
     pub redis_url: String,
+    /// PEM-encoded TLS certificate (optional). When both cert and key
+    /// are set the server uses them; otherwise a self-signed cert is
+    /// generated at boot inside the enclave.
+    pub tls_cert_pem: Option<String>,
+    pub tls_key_pem:  Option<String>,
 }
 
 impl Config {
@@ -36,6 +32,12 @@ impl Config {
             libp2p_listen,
             database_url,
             redis_url,
+            tls_cert_pem: std::env::var("PINAIVU_TLS_CERT").ok(),
+            tls_key_pem:  std::env::var("PINAIVU_TLS_KEY").ok(),
         })
+    }
+
+    pub fn has_tls_certs(&self) -> bool {
+        self.tls_cert_pem.is_some() && self.tls_key_pem.is_some()
     }
 }
