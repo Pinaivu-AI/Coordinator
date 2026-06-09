@@ -192,7 +192,6 @@ async fn run() -> Result<()> {
         on_chain_state,
     );
     state.set_pg_pool(pg_pool.clone()).await;
-    state.set_redis(redis_conn).await;
     state.set_tls_cert_fingerprint(tls_fingerprint).await;
 
     // ── HTTPS server ───────────────────────────────────────────────────────
