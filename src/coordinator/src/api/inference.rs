@@ -34,15 +34,13 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
     aead::{Aead, KeyInit},
 };
-use axum::{extract::State, Extension, Json};
+use axum::{extract::State, Json};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use x25519_dalek::PublicKey as X25519PublicKey;
 
-use crate::api::usage;
 use crate::app::{AppError, AppState};
-use crate::auth::key::ApiKeyContext;
 use crate::marketplace::auction::{
     collect_bids, fetch_warmth_map, pick_winner_with_warmth, DEFAULT_AUCTION_WINDOW,
 };
@@ -98,9 +96,6 @@ pub struct ChatCompletionDispatch {
 
 pub async fn chat_completions(
     State(state): State<AppState>,
-    // Optional: present when called through require_api_key middleware,
-    // absent in tests that use build_router_no_auth.
-    key_ctx: Option<Extension<ApiKeyContext>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Json<ChatCompletionDispatch>, AppError> {
     let request_id = Uuid::new_v4();
@@ -176,16 +171,6 @@ pub async fn chat_completions(
         signature: Vec::new(),
     }
     .sign(state.enclave_key().signing_key());
-
-    // Record usage for billing. Fire-and-forget — a DB hiccup must not
-    // block the client. Token counts are 0 now; updated on CompletionAck.
-    if let (Some(Extension(ctx)), Some(pool)) = (key_ctx, state.pg_pool().await) {
-        let key_id = ctx.api_key_id;
-        let model  = req.model.clone();
-        tokio::spawn(async move {
-            usage::record_dispatch(&pool, request_id, key_id, &model).await;
-        });
-    }
 
     // Bids carry the winning node's HTTP endpoint directly — the node
     // advertises its own URL so the coordinator doesn't have to guess.

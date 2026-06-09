@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nautilus_enclave::EnclaveKeyPair;
-use redis::aio::ConnectionManager as RedisConn;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
@@ -32,11 +31,7 @@ struct Inner {
     pg_pool:              RwLock<Option<PgPool>>,
     started_at_ms:        u64,
     /// SHA-256 fingerprint (hex) of the TLS certificate in use.
-    /// Set once after the server binds; `None` in tests / plain-HTTP mode.
     tls_cert_fingerprint: RwLock<Option<String>>,
-    /// Multiplexed Redis connection for rate limiting and short-lived caches.
-    /// Set once after boot; `None` in tests that don't inject Redis.
-    redis:                RwLock<Option<RedisConn>>,
 }
 
 impl AppState {
@@ -116,7 +111,6 @@ impl AppState {
                 pg_pool:              RwLock::new(None),
                 started_at_ms,
                 tls_cert_fingerprint: RwLock::new(None),
-                redis:                RwLock::new(None),
             }),
         }
     }
@@ -131,10 +125,6 @@ impl AppState {
         *self.inner.tls_cert_fingerprint.write().await = Some(fingerprint);
     }
 
-    pub async fn set_redis(&self, conn: RedisConn) {
-        *self.inner.redis.write().await = Some(conn);
-    }
-
     // ── Getters ──────────────────────────────────────────────────────────────
 
     pub async fn pg_pool(&self) -> Option<PgPool> {
@@ -143,11 +133,6 @@ impl AppState {
 
     pub async fn tls_cert_fingerprint(&self) -> Option<String> {
         self.inner.tls_cert_fingerprint.read().await.clone()
-    }
-
-    /// Returns a cloned `ConnectionManager` (cheap — backed by an Arc).
-    pub async fn redis(&self) -> Option<RedisConn> {
-        self.inner.redis.read().await.clone()
     }
 
     pub fn enclave_key(&self) -> &EnclaveKeyPair {
