@@ -4,6 +4,8 @@ Cargo.lock
 .env.*
 !.env.example
 !.env.dev.example
+!.env.runtime.example
+docker-compose.yml
 *.swp
 .DS_Store
 *.eif
