@@ -11,45 +11,44 @@ use coordinator::app::AppState;
 use coordinator::mesh::InMemoryMesh;
 use coordinator::protocol::{InferenceBid, NanoX, NodePeerId};
 use coordinator::{bind, build_router_no_auth as build_router};
+use libp2p::PeerId;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 #[derive(Deserialize, Debug)]
-struct ChatCompletionDispatch {
+struct ChatCompletionResult {
     request_id: Uuid,
-    node_url: String,
-    dispatch_token: DispatchTokenWire,
+    session_id: Uuid,
+    content: String,
+    session_key: String,
+    #[allow(dead_code)]
+    input_tokens: u32,
+    #[allow(dead_code)]
+    output_tokens: u32,
+    #[allow(dead_code)]
+    latency_ms: u32,
 }
-
-#[derive(Deserialize, Debug)]
-struct DispatchTokenWire {
-    request_id: Uuid,
-    primary_peer_id: NodePeerIdWire,
-    coordinator_pubkey: Vec<u8>,
-    signature: Vec<u8>,
-    #[serde(flatten)]
-    _rest: serde_json::Value,
-}
-
-#[derive(Deserialize, Debug)]
-struct NodePeerIdWire(String);
 
 #[derive(Deserialize)]
 struct EnclaveHealth {
+    #[allow(dead_code)]
     public_key_hex: String,
     #[allow(dead_code)]
     uptime_ms: u64,
 }
 
-fn bid(peer: &str, price: u64, latency: u32, reputation: f32) -> InferenceBid {
+/// Bids must carry a *real* libp2p PeerId string — the coordinator
+/// parses `node_peer_id` to dispatch the inference job over libp2p
+/// (see `api/inference.rs`), so a made-up label won't parse.
+fn bid(peer: &PeerId, price: u64, latency: u32, reputation: f32) -> InferenceBid {
     InferenceBid {
         request_id: Uuid::nil(), // rewritten by InMemoryMesh on publish
-        node_peer_id: NodePeerId(peer.into()),
+        node_peer_id: NodePeerId(peer.to_string()),
         price_per_1k: NanoX(price),
         latency_ms: latency,
         reputation,
-        payout_address: format!("0x{:0>62}", peer),
+        payout_address: format!("0x{:0>62}", peer.to_string()),
         http_endpoint: format!("http://node-{peer}.test:5000"),
         node_x25519_pubkey: None,
     }
@@ -69,25 +68,30 @@ async fn spawn(mesh: Arc<InMemoryMesh>) -> (String, tokio::task::JoinHandle<()>)
 
 #[tokio::test]
 async fn auction_picks_best_bid_and_token_verifies() {
+    let peer_a = PeerId::random();
+    let peer_b = PeerId::random();
+    let peer_c = PeerId::random();
     let mesh = Arc::new(InMemoryMesh::new());
     mesh.seed_bids(vec![
-        bid("A-slow-expensive", 200, 800, 0.4),
-        bid("B-fast-cheap-rep", 50, 300, 0.9),
-        bid("C-mid", 100, 500, 0.6),
+        bid(&peer_a, 200, 800, 0.4),
+        bid(&peer_b, 50, 300, 0.9),
+        bid(&peer_c, 100, 500, 0.6),
     ]);
 
     let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
-    let coord_pubkey_hex: String = client
+    // Confirm /enclave_health is reachable and well-formed (the
+    // coordinator's signing key is verified end-to-end elsewhere —
+    // this test focuses on auction winner selection).
+    let _health: EnclaveHealth = client
         .get(format!("{base}/enclave_health"))
         .send()
         .await
         .expect("health")
-        .json::<EnclaveHealth>()
+        .json()
         .await
-        .expect("json")
-        .public_key_hex;
+        .expect("json");
 
     let body = json!({
         "model": "qwen-72b",
@@ -103,20 +107,14 @@ async fn auction_picks_best_bid_and_token_verifies() {
         .await
         .expect("dispatch request");
     assert!(resp.status().is_success(), "status: {}", resp.status());
-    let dispatch: ChatCompletionDispatch = resp.json().await.expect("json");
+    let result: ChatCompletionResult = resp.json().await.expect("json");
 
     // Composite score makes B the winner (lowest price, lowest latency,
-    // highest reputation).
-    assert_eq!(dispatch.dispatch_token.primary_peer_id.0, "B-fast-cheap-rep");
-    // node_url is the winner bid's http_endpoint field.
-    assert_eq!(dispatch.node_url, "http://node-B-fast-cheap-rep.test:5000");
-    assert_eq!(dispatch.dispatch_token.request_id, dispatch.request_id);
-
-    // The dispatch token was signed by the coordinator's enclave key
-    // exposed via /enclave_health. They must match.
-    let coord_pubkey_bytes = hex::decode(&coord_pubkey_hex).expect("hex");
-    assert_eq!(dispatch.dispatch_token.coordinator_pubkey, coord_pubkey_bytes);
-    assert_eq!(dispatch.dispatch_token.signature.len(), 64);
+    // highest reputation). InMemoryMesh's dispatch_inference echoes the
+    // peer it was asked to dispatch to in the reply content.
+    assert_eq!(result.content, format!("mock-reply-from-{peer_b}"));
+    assert!(!result.session_key.is_empty());
+    assert_ne!(result.session_id, Uuid::nil());
 
     handle.abort();
 }
@@ -131,7 +129,7 @@ async fn empty_auction_returns_not_found() {
 
     let body = json!({
         "model": "qwen-72b",
-        "messages": [],
+        "messages": [{"role": "user", "content": "hello"}],
         "client_pubkey_hex": "00".repeat(32),
     });
 
@@ -148,15 +146,16 @@ async fn empty_auction_returns_not_found() {
 
 #[tokio::test]
 async fn bad_client_pubkey_hex_returns_bad_request() {
+    let peer = PeerId::random();
     let mesh = Arc::new(InMemoryMesh::new());
-    mesh.seed_bids(vec![bid("A", 50, 300, 0.9)]);
+    mesh.seed_bids(vec![bid(&peer, 50, 300, 0.9)]);
 
     let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     let body = json!({
         "model": "qwen-72b",
-        "messages": [],
+        "messages": [{"role": "user", "content": "hello"}],
         "client_pubkey_hex": "nothex",
     });
 

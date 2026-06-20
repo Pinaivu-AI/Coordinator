@@ -1,10 +1,21 @@
 //! `POST /v1/chat/completions` — OpenAI-shaped entry point.
 //!
-//! Runs the auction on behalf of the client, signs a [`DispatchToken`]
-//! naming the winning primary node, and returns
-//! `{ request_id, node_url, dispatch_token }`. The client then opens
-//! its own HTTPS connection to `node_url` to receive the streamed
-//! response — the coordinator is never in the response data path.
+//! Runs the auction, signs a [`DispatchToken`] naming the winning
+//! primary node, then dispatches the actual inference job to that
+//! node over libp2p (`Mesh::dispatch_inference`) and waits for the
+//! reply — returning the final `content` directly in this response.
+//!
+//! This rides the node's *existing outbound* connection (it dialed the
+//! coordinator to join the mesh), which is what makes it work for
+//! nodes behind NAT — the common case for home/laptop GPU operators.
+//! An earlier version of this handler returned `{ node_url,
+//! dispatch_token }` and expected the caller to dial the node's HTTP
+//! server directly; that only works for nodes with a public IP, which
+//! most real operators don't have. The tradeoff: prompt and response
+//! content now pass through the coordinator's enclave on their way to
+//! and from the node (see `docs/architecture.md` for the full
+//! discussion of why this is still the better choice than adding a
+//! second, unattested relay component just to avoid it).
 //!
 //! ## Encrypted mode
 //!
@@ -22,11 +33,6 @@
 //!
 //! The coordinator decrypts inside the Nitro Enclave — the operator
 //! never sees the plaintext prompt.
-//!
-//! In a future slice this handler will return a `307` redirect to the
-//! primary node's URL with `X-Pinaivu-Dispatch-Token` in the header so
-//! the standard OpenAI SDK works transparently. For now we return a
-//! JSON body, which keeps the integration test simple.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +50,7 @@ use crate::app::{AppError, AppState};
 use crate::marketplace::auction::{
     collect_bids, fetch_warmth_map, pick_winner_with_warmth, DEFAULT_AUCTION_WINDOW,
 };
+use crate::mesh::{InferenceDispatch, InferenceReply};
 use crate::protocol::{
     ClientSessionIntent, DispatchToken, InferenceRequest, NanoX, PrivacyLevel,
 };
@@ -84,20 +91,34 @@ pub struct ChatCompletionRequest {
     pub messages_encrypted: Option<String>,
     /// Base64-encoded 12-byte AES-256-GCM nonce.
     pub messages_nonce: Option<String>,
+
+    /// AES-256 key (base64) for the node's Walrus session blob. Caller
+    /// generates on first turn and persists locally; we mint a fresh
+    /// one if absent. Forwarded to the node, never stored here.
+    #[serde(default)]
+    pub session_key: Option<String>,
+    /// Cross-session memory facts recalled by a caller's own long-term
+    /// memory store (e.g. chat-relayer's pgvector + Walrus stack).
+    /// Forwarded into the node's assembled system prompt as-is.
+    #[serde(default)]
+    pub memwal_context: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ChatCompletionDispatch {
+pub struct ChatCompletionResult {
     pub request_id: Uuid,
     pub session_id: Uuid,
-    pub node_url: String,
-    pub dispatch_token: DispatchToken,
+    pub content: String,
+    pub session_key: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub latency_ms: u32,
 }
 
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<ChatCompletionDispatch>, AppError> {
+) -> Result<Json<ChatCompletionResult>, AppError> {
     let request_id = Uuid::new_v4();
     let (session_id, session_intent) = match req.session_id {
         Some(id) => (id, ClientSessionIntent::Continue),
@@ -105,7 +126,13 @@ pub async fn chat_completions(
     };
 
     // Resolve messages — either decrypt the encrypted payload or use plaintext.
-    let _messages = decrypt_messages_if_encrypted(&state, &req)?;
+    let messages = decrypt_messages_if_encrypted(&state, &req)?;
+    let new_user_message = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .ok_or_else(|| AppError::BadRequest("messages must include a user turn".into()))?;
 
     let inference_request = InferenceRequest {
         request_id,
@@ -172,15 +199,43 @@ pub async fn chat_completions(
     }
     .sign(state.enclave_key().signing_key());
 
-    // Bids carry the winning node's HTTP endpoint directly — the node
-    // advertises its own URL so the coordinator doesn't have to guess.
-    let node_url = winner.http_endpoint.clone();
+    let session_key = req.session_key.clone().unwrap_or_else(|| {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        use rand::RngCore;
+        let mut k = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut k);
+        B64.encode(k)
+    });
 
-    Ok(Json(ChatCompletionDispatch {
+    let peer_id: libp2p::PeerId = winner.node_peer_id.0.parse().map_err(|e| {
+        AppError::Internal(format!("winning bid has invalid peer_id: {e}"))
+    })?;
+
+    let dispatch = InferenceDispatch {
+        dispatch_token: token,
+        session_key: session_key.clone(),
+        new_user_message,
+        memwal_context: req.memwal_context.clone(),
+    };
+
+    let reply: InferenceReply = state
+        .mesh()
+        .dispatch_inference(peer_id, dispatch)
+        .await
+        .map_err(|e| AppError::Upstream(format!("node dispatch failed: {e}")))?;
+
+    if let Some(err) = reply.error {
+        return Err(AppError::Upstream(format!("node returned an error: {err}")));
+    }
+
+    Ok(Json(ChatCompletionResult {
         request_id,
         session_id,
-        node_url,
-        dispatch_token: token,
+        content: reply.content,
+        session_key,
+        input_tokens: reply.input_tokens,
+        output_tokens: reply.output_tokens,
+        latency_ms: reply.latency_ms,
     }))
 }
 

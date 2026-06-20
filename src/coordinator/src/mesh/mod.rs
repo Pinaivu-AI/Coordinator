@@ -12,6 +12,7 @@ pub mod test_mesh;
 // Re-exported under their original paths so existing imports keep working.
 pub use pinaivu_protocol::mesh::behaviour;
 pub use pinaivu_protocol::mesh::completion_proto;
+pub use pinaivu_protocol::mesh::inference_proto;
 pub use pinaivu_protocol::mesh::topics;
 
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use libp2p::{gossipsub::IdentTopic, Multiaddr};
+use libp2p::{gossipsub::IdentTopic, Multiaddr, PeerId};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{InferenceBid, InferenceRequest};
@@ -27,6 +28,7 @@ use crate::receipts::ReceiptArchive;
 use std::collections::HashMap;
 
 pub use completion_proto::{CompletionAck, CompletionResponse};
+pub use inference_proto::{InferenceDispatch, InferenceReply};
 pub use peer_registry::{PeerEntry, PeerRegistry};
 pub use test_mesh::InMemoryMesh;
 
@@ -51,6 +53,24 @@ pub trait Mesh: Send + Sync {
         _request_id: uuid::Uuid,
         _addresses: HashMap<String, String>,
     ) {}
+
+    /// Send the actual inference job to `peer` over libp2p and await
+    /// its reply. This rides the node's existing outbound connection
+    /// (it dialed *us* to join the mesh), so it works through NAT —
+    /// unlike dialing the node's HTTP `node_url`, which requires
+    /// something to connect *into* the node.
+    ///
+    /// Default errors out so test meshes that don't seed a node
+    /// connection fail loudly rather than hanging.
+    async fn dispatch_inference(
+        &self,
+        _peer: PeerId,
+        _dispatch: InferenceDispatch,
+    ) -> Result<InferenceReply> {
+        Err(anyhow::anyhow!(
+            "dispatch_inference not implemented for this Mesh"
+        ))
+    }
 }
 
 /// A mesh that never produces bids. Default for `main.rs` until the
@@ -131,6 +151,23 @@ impl Mesh for Libp2pMesh {
             .cmd_tx
             .send(MeshCommand::SetPayoutAddresses { request_id, addresses })
             .await;
+    }
+
+    async fn dispatch_inference(
+        &self,
+        peer: PeerId,
+        dispatch: InferenceDispatch,
+    ) -> Result<InferenceReply> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MeshCommand::DispatchInference {
+                peer,
+                dispatch,
+                reply_tx: tx,
+            })
+            .await
+            .context("send dispatch-inference command")?;
+        rx.await.context("dispatch-inference reply")?
     }
 }
 

@@ -14,6 +14,7 @@ use anyhow::Result;
 use coordinator::app::AppState;
 use coordinator::mesh::{
     behaviour::{libp2p_identity_from_ed25519_secret, PinaivuBehaviour, PinaivuBehaviourEvent},
+    inference_proto::InferenceReply,
     spawn_libp2p_mesh,
     topics::{BIDS, INFERENCE_ANY},
     PeerRegistry,
@@ -25,8 +26,9 @@ use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic},
     multiaddr::Protocol,
+    request_response,
     swarm::SwarmEvent,
-    Multiaddr,
+    Multiaddr, PeerId,
 };
 use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
@@ -34,32 +36,39 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[derive(Deserialize, Debug)]
-struct ChatDispatch {
+struct ChatCompletionResult {
+    #[allow(dead_code)]
     request_id: Uuid,
-    node_url: String,
-    dispatch_token: DispatchTokenWire,
+    #[allow(dead_code)]
+    session_id: Uuid,
+    content: String,
+    #[allow(dead_code)]
+    session_key: String,
 }
-
-#[derive(Deserialize, Debug)]
-struct DispatchTokenWire {
-    primary_peer_id: NodePeerIdWire,
-    signature: Vec<u8>,
-    #[serde(flatten)]
-    _rest: serde_json::Value,
-}
-
-#[derive(Deserialize, Debug)]
-struct NodePeerIdWire(String);
 
 /// Bare libp2p participant that listens on the marketplace network
 /// and publishes a configured bid in reply to every inference
 /// request it observes.
 struct MockNode {
     listen_addr: Multiaddr,
+    #[allow(dead_code)]
+    peer_id: PeerId,
     _task: tokio::task::JoinHandle<()>,
 }
 
-async fn spawn_mock_node(bid_template: InferenceBid) -> Result<MockNode> {
+/// Parameters for the bid the mock node publishes. `node_peer_id` is
+/// filled in once the swarm's real `PeerId` is known — the coordinator
+/// parses that field to dispatch the inference job over libp2p, so it
+/// must be a real, connectable PeerId, not a made-up label.
+struct MockBidParams {
+    price_per_1k: u64,
+    latency_ms: u32,
+    reputation: f32,
+    http_endpoint: String,
+    payout_address: String,
+}
+
+async fn spawn_mock_node(params: MockBidParams) -> Result<MockNode> {
     let mut secret = [0u8; 32];
     OsRng.fill_bytes(&mut secret);
     let identity = libp2p_identity_from_ed25519_secret(&secret)?;
@@ -78,6 +87,18 @@ async fn spawn_mock_node(bid_template: InferenceBid) -> Result<MockNode> {
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
+    let local_peer_id = *swarm.local_peer_id();
+    let bid_template = InferenceBid {
+        request_id: Uuid::nil(),
+        node_peer_id: NodePeerId(local_peer_id.to_string()),
+        price_per_1k: NanoX(params.price_per_1k),
+        latency_ms: params.latency_ms,
+        reputation: params.reputation,
+        http_endpoint: params.http_endpoint,
+        payout_address: params.payout_address,
+        node_x25519_pubkey: None,
+    };
+
     let topics = [INFERENCE_ANY, BIDS];
     for t in topics {
         swarm
@@ -92,8 +113,7 @@ async fn spawn_mock_node(bid_template: InferenceBid) -> Result<MockNode> {
     let listen_addr = loop {
         match swarm.select_next_some().await {
             SwarmEvent::NewListenAddr { address, .. } => {
-                let peer_id = *swarm.local_peer_id();
-                break address.with(Protocol::P2p(peer_id));
+                break address.with(Protocol::P2p(local_peer_id));
             }
             _ => continue,
         }
@@ -117,6 +137,26 @@ async fn spawn_mock_node(bid_template: InferenceBid) -> Result<MockNode> {
                         }
                     }
                 }
+                SwarmEvent::Behaviour(PinaivuBehaviourEvent::Inference(
+                    request_response::Event::Message {
+                        message: request_response::Message::Request { request, channel, .. },
+                        ..
+                    },
+                )) => {
+                    // Echo the dispatch back as a canned reply — proves
+                    // the coordinator successfully dispatched the actual
+                    // inference job over libp2p (not just the auction).
+                    let reply = InferenceReply {
+                        request_id: request.dispatch_token.request_id,
+                        session_id: request.dispatch_token.session_id,
+                        content: "mock-node-reply".into(),
+                        input_tokens: 5,
+                        output_tokens: 7,
+                        latency_ms: 3,
+                        error: None,
+                    };
+                    let _ = swarm.behaviour_mut().inference.send_response(channel, reply);
+                }
                 _ => {}
             }
         }
@@ -124,6 +164,7 @@ async fn spawn_mock_node(bid_template: InferenceBid) -> Result<MockNode> {
 
     Ok(MockNode {
         listen_addr,
+        peer_id: local_peer_id,
         _task: task,
     })
 }
@@ -134,17 +175,15 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
     // dial. Lower price + latency + higher reputation than anything
     // the coordinator would invent on its own, so the dispatch
     // unambiguously names this node.
-    let bid_template = InferenceBid {
-        request_id: Uuid::nil(),
-        node_peer_id: NodePeerId("MOCK-NODE-PRIMARY".into()),
-        price_per_1k: NanoX(50),
+    let mock = spawn_mock_node(MockBidParams {
+        price_per_1k: 50,
         latency_ms: 200,
         reputation: 0.95,
         http_endpoint: "http://mock-node-primary.test:5000".into(),
         payout_address: "0xMOCK-NODE-PRIMARY-payout".into(),
-        node_x25519_pubkey: None,
-    };
-    let mock = spawn_mock_node(bid_template).await.expect("mock node");
+    })
+    .await
+    .expect("mock node");
 
     // Spawn the coordinator's libp2p mesh on an ephemeral loopback
     // port. Single enclave keypair shared between libp2p and HTTP.
@@ -189,12 +228,13 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
     });
 
     let client = reqwest::Client::new();
-    // Bump the per-request timeout so the gossipsub trip isn't racing
-    // CI host load; 5s is generous.
+    // Bump the per-request timeout so the gossipsub trip (auction)
+    // plus the inference request-response round trip aren't racing
+    // CI host load; 8s is generous for two loopback round trips.
     let resp = client
         .post(format!("{base}/v1/chat/completions"))
         .json(&body)
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8))
         .send()
         .await
         .expect("post chat completions");
@@ -205,13 +245,12 @@ async fn coordinator_auctions_a_real_bid_over_libp2p() {
         resp.status(),
         resp.text().await.ok()
     );
-    let dispatch: ChatDispatch = resp.json().await.expect("json");
+    let result: ChatCompletionResult = resp.json().await.expect("json");
 
-    assert_eq!(dispatch.dispatch_token.primary_peer_id.0, "MOCK-NODE-PRIMARY");
-    // node_url now comes from the bid's http_endpoint, not the peer-id.
-    assert_eq!(dispatch.node_url, "http://mock-node-primary.test:5000");
-    assert_eq!(dispatch.dispatch_token.signature.len(), 64);
-    assert_eq!(dispatch.dispatch_token._rest["request_id"], serde_json::Value::String(dispatch.request_id.to_string()));
+    // The mock node's canned reply proves the coordinator successfully
+    // dispatched the actual inference job over libp2p to the winning
+    // peer (not just ran the auction).
+    assert_eq!(result.content, "mock-node-reply");
 
     http_task.abort();
     drop(mesh_handle);

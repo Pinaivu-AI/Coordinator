@@ -23,6 +23,7 @@ use libp2p::{
 };
 
 use super::completion_proto::{CompletionAck, CompletionResponse, COMPLETION_PROTOCOL};
+use super::inference_proto::{InferenceDispatch, InferenceReply, INFERENCE_PROTOCOL};
 use super::recruit_proto::{RecruitRequest, RecruitResponse, RECRUIT_PROTOCOL};
 
 /// Application-level protocol version reported by `identify`.
@@ -42,6 +43,9 @@ pub struct PinaivuBehaviour {
     pub completion: request_response::cbor::Behaviour<CompletionAck, CompletionResponse>,
     /// primary node → helper node: signed RecruitRequest.
     pub recruit: request_response::cbor::Behaviour<RecruitRequest, RecruitResponse>,
+    /// coordinator → node: the actual inference job, riding the node's
+    /// existing outbound connection so it works through NAT.
+    pub inference: request_response::cbor::Behaviour<InferenceDispatch, InferenceReply>,
 }
 
 impl PinaivuBehaviour {
@@ -93,6 +97,11 @@ impl PinaivuBehaviour {
             request_response::Config::default(),
         );
 
+        let inference = request_response::cbor::Behaviour::new(
+            [(INFERENCE_PROTOCOL, request_response::ProtocolSupport::Full)],
+            request_response::Config::default(),
+        );
+
         Ok(Self {
             gossipsub,
             kademlia,
@@ -100,6 +109,7 @@ impl PinaivuBehaviour {
             ping,
             completion,
             recruit,
+            inference,
         })
     }
 }

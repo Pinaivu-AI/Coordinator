@@ -20,6 +20,7 @@ use coordinator::app::AppState;
 use coordinator::mesh::InMemoryMesh;
 use coordinator::protocol::{InferenceBid, NanoX, NodePeerId};
 use coordinator::{bind, build_router_no_auth as build_router};
+use libp2p::PeerId;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use serde_json::json;
@@ -37,18 +38,24 @@ struct EnclaveHealth {
 }
 
 #[derive(Deserialize, Debug)]
-struct ChatCompletionDispatch {
+struct ChatCompletionResult {
     #[allow(dead_code)]
     request_id: Uuid,
-    node_url:   String,
-    dispatch_token: serde_json::Value,
+    #[allow(dead_code)]
+    session_id: Uuid,
+    content: String,
+    #[allow(dead_code)]
+    session_key: String,
 }
 
-fn one_bidder_mesh() -> Arc<InMemoryMesh> {
+/// `node_peer_id` must be a real libp2p PeerId string — the
+/// coordinator parses it to dispatch over libp2p.
+fn one_bidder_mesh() -> (Arc<InMemoryMesh>, PeerId) {
+    let peer = PeerId::random();
     let mesh = Arc::new(InMemoryMesh::new());
     mesh.seed_bids(vec![InferenceBid {
         request_id:    Uuid::nil(),
-        node_peer_id:  NodePeerId("enc-test-node".into()),
+        node_peer_id:  NodePeerId(peer.to_string()),
         price_per_1k:  NanoX(50),
         latency_ms:    200,
         reputation:    0.9,
@@ -56,7 +63,7 @@ fn one_bidder_mesh() -> Arc<InMemoryMesh> {
         http_endpoint: "http://enc-node.test:5000".into(),
         node_x25519_pubkey: None,
     }]);
-    mesh
+    (mesh, peer)
 }
 
 async fn spawn(mesh: Arc<InMemoryMesh>) -> (String, tokio::task::JoinHandle<()>) {
@@ -122,7 +129,8 @@ fn client_encrypt(
 /// auction runs → signed dispatch token returned.
 #[tokio::test]
 async fn encrypted_request_returns_valid_dispatch_token() {
-    let (base, handle) = spawn(one_bidder_mesh()).await;
+    let (mesh, peer) = one_bidder_mesh();
+    let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     // 1. Fetch the enclave's X25519 public key.
@@ -150,9 +158,8 @@ async fn encrypted_request_returns_valid_dispatch_token() {
         .send().await.unwrap();
 
     assert!(resp.status().is_success(), "unexpected status: {}", resp.status());
-    let dispatch: ChatCompletionDispatch = resp.json().await.unwrap();
-    assert_eq!(dispatch.dispatch_token["primary_peer_id"], "enc-test-node");
-    assert_eq!(dispatch.node_url, "http://enc-node.test:5000");
+    let result: ChatCompletionResult = resp.json().await.unwrap();
+    assert_eq!(result.content, format!("mock-reply-from-{peer}"));
 
     handle.abort();
 }
@@ -160,7 +167,8 @@ async fn encrypted_request_returns_valid_dispatch_token() {
 /// Plaintext mode must still work — the three encrypted fields are optional.
 #[tokio::test]
 async fn plaintext_request_still_works() {
-    let (base, handle) = spawn(one_bidder_mesh()).await;
+    let (mesh, peer) = one_bidder_mesh();
+    let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -173,8 +181,8 @@ async fn plaintext_request_still_works() {
         .send().await.unwrap();
 
     assert!(resp.status().is_success(), "status: {}", resp.status());
-    let dispatch: ChatCompletionDispatch = resp.json().await.unwrap();
-    assert_eq!(dispatch.dispatch_token["primary_peer_id"], "enc-test-node");
+    let result: ChatCompletionResult = resp.json().await.unwrap();
+    assert_eq!(result.content, format!("mock-reply-from-{peer}"));
 
     handle.abort();
 }
@@ -182,7 +190,8 @@ async fn plaintext_request_still_works() {
 /// Only one of the three encrypted fields present → 400 Bad Request.
 #[tokio::test]
 async fn partial_encrypted_fields_rejected() {
-    let (base, handle) = spawn(one_bidder_mesh()).await;
+    let (mesh, _peer) = one_bidder_mesh();
+    let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -203,7 +212,8 @@ async fn partial_encrypted_fields_rejected() {
 /// Ciphertext bit-flipped → AES-GCM authentication fails → 400.
 #[tokio::test]
 async fn corrupted_ciphertext_rejected() {
-    let (base, handle) = spawn(one_bidder_mesh()).await;
+    let (mesh, _peer) = one_bidder_mesh();
+    let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     let health: EnclaveHealth = client
@@ -238,7 +248,8 @@ async fn corrupted_ciphertext_rejected() {
 /// Client encrypted with a random key (wrong enclave pubkey) → decrypt fails → 400.
 #[tokio::test]
 async fn wrong_key_ciphertext_rejected() {
-    let (base, handle) = spawn(one_bidder_mesh()).await;
+    let (mesh, _peer) = one_bidder_mesh();
+    let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     let health: EnclaveHealth = client
@@ -275,7 +286,8 @@ async fn wrong_key_ciphertext_rejected() {
 /// Non-base64 nonce → 400 before decryption even starts.
 #[tokio::test]
 async fn invalid_nonce_base64_rejected() {
-    let (base, handle) = spawn(one_bidder_mesh()).await;
+    let (mesh, _peer) = one_bidder_mesh();
+    let (base, handle) = spawn(mesh).await;
     let client = reqwest::Client::new();
 
     let health: EnclaveHealth = client

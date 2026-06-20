@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use super::behaviour::{PinaivuBehaviour, PinaivuBehaviourEvent};
 use super::completion_proto::{CompletionAck, CompletionResponse};
+use super::inference_proto::{InferenceDispatch, InferenceReply};
 use super::peer_registry::PeerRegistry;
 use super::topics::{ANNOUNCE, BIDS, INFERENCE_ANY, REPUTATION};
 use crate::jobs::settlement_worker::SettlementJob;
@@ -55,6 +56,14 @@ pub enum MeshCommand {
     },
     ListenAddrs {
         reply_tx: oneshot::Sender<Vec<Multiaddr>>,
+    },
+    /// Send the actual inference job to a node over its existing
+    /// outbound libp2p connection (works through NAT) and await the
+    /// reply.
+    DispatchInference {
+        peer: PeerId,
+        dispatch: InferenceDispatch,
+        reply_tx: oneshot::Sender<Result<InferenceReply>>,
     },
 }
 
@@ -89,6 +98,9 @@ pub struct EventLoop {
     in_flight: HashMap<Uuid, InFlightMeta>,
     listen_addrs: Vec<Multiaddr>,
     ready_tx: Option<oneshot::Sender<()>>,
+    /// Outbound `InferenceDispatch` requests awaiting a reply, keyed by
+    /// the libp2p request id `send_request` returns.
+    pending_inference: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<InferenceReply>>>,
 }
 
 impl EventLoop {
@@ -137,6 +149,7 @@ impl EventLoop {
             in_flight: HashMap::new(),
             listen_addrs: Vec::new(),
             ready_tx: Some(ready_tx),
+            pending_inference: HashMap::new(),
         }
     }
 
@@ -193,6 +206,23 @@ impl EventLoop {
                 },
             )) => {
                 self.handle_completion_ack(peer, request, channel).await;
+            }
+            SwarmEvent::Behaviour(PinaivuBehaviourEvent::Inference(
+                request_response::Event::Message {
+                    message: request_response::Message::Response { request_id, response },
+                    ..
+                },
+            )) => {
+                if let Some(reply_tx) = self.pending_inference.remove(&request_id) {
+                    let _ = reply_tx.send(Ok(response));
+                }
+            }
+            SwarmEvent::Behaviour(PinaivuBehaviourEvent::Inference(
+                request_response::Event::OutboundFailure { request_id, error, .. },
+            )) => {
+                if let Some(reply_tx) = self.pending_inference.remove(&request_id) {
+                    let _ = reply_tx.send(Err(anyhow::anyhow!("inference outbound failure: {error}")));
+                }
             }
             SwarmEvent::Behaviour(PinaivuBehaviourEvent::Identify(
                 identify::Event::Received { peer_id, info, .. },
@@ -422,6 +452,14 @@ impl EventLoop {
             }
             MeshCommand::ListenAddrs { reply_tx } => {
                 let _ = reply_tx.send(self.listen_addrs.clone());
+            }
+            MeshCommand::DispatchInference { peer, dispatch, reply_tx } => {
+                let out_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .inference
+                    .send_request(&peer, dispatch);
+                self.pending_inference.insert(out_id, reply_tx);
             }
         }
     }

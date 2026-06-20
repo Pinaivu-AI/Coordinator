@@ -9,7 +9,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use super::Mesh;
+use super::{InferenceDispatch, InferenceReply, Mesh};
 use crate::protocol::{InferenceBid, InferenceRequest};
 
 pub struct InMemoryMesh {
@@ -56,5 +56,23 @@ impl Mesh for InMemoryMesh {
             let _ = tx.send(bid).await;
         }
         Ok(rx)
+    }
+
+    /// No real node to dial — return a canned reply naming the peer
+    /// it was asked to dispatch to, so tests can assert on it.
+    async fn dispatch_inference(
+        &self,
+        peer: libp2p::PeerId,
+        dispatch: InferenceDispatch,
+    ) -> Result<InferenceReply> {
+        Ok(InferenceReply {
+            request_id: dispatch.dispatch_token.request_id,
+            session_id: dispatch.dispatch_token.session_id,
+            content: format!("mock-reply-from-{peer}"),
+            input_tokens: 10,
+            output_tokens: 20,
+            latency_ms: 5,
+            error: None,
+        })
     }
 }
