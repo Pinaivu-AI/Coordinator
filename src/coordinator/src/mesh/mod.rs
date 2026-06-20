@@ -223,7 +223,16 @@ pub async fn spawn_libp2p_mesh_full(
         .with_tcp(
             libp2p::tcp::Config::default(),
             libp2p::noise::Config::new,
-            libp2p::yamux::Config::default,
+            // Default yamux receive_window (256 KiB) and max_buffer_size
+            // (1 MiB) are plenty for our CBOR payloads, but widen them
+            // anyway — a long inference reply riding this connection
+            // shouldn't be anywhere close to either limit.
+            || {
+                let mut cfg = libp2p::yamux::Config::default();
+                cfg.set_receive_window_size(4 * 1024 * 1024);
+                cfg.set_max_buffer_size(16 * 1024 * 1024);
+                cfg
+            },
         )
         .map_err(|e| anyhow::anyhow!("tcp transport: {e}"))?
         .with_behaviour(|key| {
@@ -231,7 +240,10 @@ pub async fn spawn_libp2p_mesh_full(
                 .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))
         })
         .map_err(|e| anyhow::anyhow!("compose behaviour: {e}"))?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        // Generous headroom above the inference request_timeout (120s,
+        // see behaviour.rs) so the connection itself never closes out
+        // from under a still-in-flight long-running inference reply.
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
         .build();
 
     for t in SUBSCRIBED_TOPICS {
