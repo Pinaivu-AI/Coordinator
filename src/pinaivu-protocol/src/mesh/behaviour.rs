@@ -97,9 +97,14 @@ impl PinaivuBehaviour {
             request_response::Config::default(),
         );
 
+        // Default request_timeout (10s) is far shorter than a real LLM
+        // generation can take, especially for longer prompts/answers —
+        // the dispatch would time out and return an upstream error to
+        // the client while the node was still happily generating.
         let inference = request_response::cbor::Behaviour::new(
             [(INFERENCE_PROTOCOL, request_response::ProtocolSupport::Full)],
-            request_response::Config::default(),
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(120)),
         );
 
         Ok(Self {

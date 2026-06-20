@@ -10,9 +10,10 @@ use tokio::time::{timeout_at, Instant};
 
 use crate::protocol::InferenceBid;
 
-/// Default bid-collection window. The whitepaper specifies 200 ms;
-/// production deployments may widen this for cross-region propagation.
-pub const DEFAULT_AUCTION_WINDOW: Duration = Duration::from_millis(200);
+/// Default bid-collection window. The whitepaper specifies 200 ms, but
+/// that's tight for gossipsub propagation across real network latency
+/// (vs. localhost testing) — widened for production deployments.
+pub const DEFAULT_AUCTION_WINDOW: Duration = Duration::from_millis(1500);
 
 // Weights when there is no warm-cache signal. Match the original three-
 // term formula so existing deployments behave the same when the
