@@ -1,107 +1,105 @@
 # Coordinator
 
 Pinaivu coordinator — a Nautilus-style AWS Nitro Enclave component that
-runs the libp2p inference auction on behalf of clients, issues signed
-dispatch tokens, and tracks job completion. Part of the
-[Pinaivu](https://pinaivu.ai) decentralised AI inference network.
+brokers private LLM inference between clients and an open mesh of GPU
+node operators. It runs the libp2p auction, issues signed dispatch
+tokens, verifies job completion, and settles payouts on Sui. Part of
+[Pinaivu](https://pinaivu.com)'s decentralized inference network.
 
-## Status
+## Where this fits
 
-Early development. The control plane is wired end to end against an
-in-process mock mesh: the coordinator boots, generates an enclave
-keypair, serves attestation, runs an auction, signs a verifiable
-dispatch token, and returns it to the client. The libp2p mesh, apalis
-worker, settlement integration, and Nitro EIF build are next.
+The coordinator is the off-chain-but-verifiable piece of Pinaivu's trust
+model: a single instance today, but its code runs inside an attested
+Nitro Enclave and every artefact it signs is checkable against an
+on-chain record it cannot quietly alter. It is not the decentralized
+layer (that's the libp2p GPU mesh and Walrus storage) and it is not the
+on-chain layer (that's the Sui Move contracts in
+[`Pinaivu-AI/contracts`](https://github.com/Pinaivu-AI/contracts)). See
+the [decentralization & verifiability
+model](https://docs.pinaivu.com/architecture/decentralization) for the
+full breakdown, and [why Sui](https://docs.pinaivu.com/architecture/why-sui)
+for why the on-chain layer is Move + Nautilus + Walrus specifically.
 
-## Architecture
+The coordinator is never in the response data path. It signs
+attestations, dispatch tokens, and routing receipts; the actual
+inference response streams directly from the winning node to the
+client.
 
 ```
 client (1) ── POST /v1/chat/completions ─▶ coordinator (Nitro Enclave)
-client ◀──── { node_url, dispatch_token } ──┤  + parent socat forwarders
+client ◀──── { node_url, dispatch_token, session_id } ──┤
 client (2) ── HTTPS w/ dispatch_token ─────▶ node_1
 node_1 ◀── recruits node_2 over libp2p ───▶ node_2
 node_1 ── streams response direct ─▶ client
 node_1 ── completion ack + proofs ─▶ coordinator
+coordinator ── settle() PTB ─▶ Sui vault contract
 ```
-
-The coordinator is never in the response data path. It signs
-attestations, dispatch tokens, and routing receipts; everything else
-flows peer-to-peer. See
-`/home/ash/pinaivu_ai_items/architecture-overview.md` for the full
-trust model and helper-recruitment details.
 
 ## Crate layout
 
 | Path | Role |
 |---|---|
-| `src/coordinator/` | Main binary + library — axum HTTP, marketplace, persistence wiring |
+| `src/coordinator/` | Main binary + library — axum HTTP, marketplace, persistence, on-chain registration |
+| `src/pinaivu-protocol/` | Shared wire types (`ProofOfInference`, `DispatchToken`, `RoutingReceipt`, mesh behaviour/topics) — also depended on by the node |
 | `src/nautilus-enclave/` | Enclave keypair + NSM attestation (mock by default, real behind `--features aws`) |
 | `src/aws/` | NSM ioctl + platform init |
-| `src/init/` | Nitro Enclave init process |
+| `src/init/` | Nitro Enclave init process, spawns the TS sidecar that holds the Sui operator key |
 | `src/system/` | Low-level system utilities |
 
-Inside `src/coordinator/src/` modules are grouped by concern:
-`app/`, `observability/`, `protocol/`, `mesh/`, `marketplace/`,
-`reputation/`, `settlement/`, `jobs/`, `persistence/`, `api/`.
+Inside `src/coordinator/src/` modules are grouped by concern: `api/`,
+`app/`, `jobs/`, `marketplace/`, `mesh/`, `observability/`, `onchain/`,
+`payments/`, `persistence/`, `receipts/`, `reputation/`, `settlement/`.
 
-## What works today
+## What this does
 
-- Coordinator boots, generates an Ed25519 enclave key, binds an axum
-  HTTP server (TCP for dev, VSOCK for prod) with graceful shutdown.
-- Endpoints:
-  - `GET  /health` — liveness
-  - `GET  /enclave_health` — `{ public_key_hex, uptime_ms }`
-  - `GET  /get_attestation` — NSM `AttestationDoc` (mock impl binds
-    pubkey to PCRs; real impl behind the `aws` feature)
-  - `POST /v1/chat/completions` — runs the auction, signs a
-    `DispatchToken`, returns `{ request_id, node_url, dispatch_token }`
-- Protocol artefacts (`ProofOfInference`, `DispatchToken`,
-  `RoutingReceipt`) have real canonical-bytes / sign / verify with
-  Ed25519. Every field is signature-covered; tamper-on-any-field is
-  detected.
-- Auction engine: 200 ms bid-collection window, composite
-  price/latency/reputation scoring per whitepaper §12.3, tie-break on
-  lowest price.
-- `Mesh` trait abstracts the marketplace network so the auction runs
-  against an `InMemoryMesh` in tests and (soon) a libp2p swarm in
-  production.
+- Boots, generates an Ed25519 enclave key, binds an axum HTTP server
+  (TCP for dev, VSOCK for prod) with graceful shutdown.
+- Runs a real libp2p mesh (gossipsub auctions, request-response for
+  dispatch and completion acks) — not a mock. Nodes bid in an open
+  200ms window; the coordinator scores bids on price, latency,
+  reputation, and Walrus-backed session cache warmth, then dispatches
+  to the winner.
+- Tracks every accepted job as an apalis job backed by Postgres, with
+  a deadline watcher that triggers refunds on timeout.
+- Verifies completion acks (primary + any helper proofs), writes a
+  signed `RoutingReceipt` to Postgres, and computes per-node payouts
+  from the proof set.
+- Registers its NSM attestation on Sui at startup via an in-enclave
+  TS sidecar holding the operator key, so its attested pubkey is
+  checkable on-chain (`pinaivu::enclave::register_enclave`).
+- Settles payouts by submitting `vault::settle()` PTBs signed against
+  the registered enclave key — the operator key only pays gas, it
+  cannot authorize a payout on its own.
+- Exposes routing receipts and session debug info via `GET
+  /v1/proofs/{request_id}` and `GET /v1/admin/sessions/{session_id}`.
 
-## What's stubbed
+## Endpoints
 
-- libp2p `Swarm` is not yet constructed (only the `Mesh` trait + mock).
-- Apalis worker, Postgres + Redis persistence, settlement-adapter
-  invocation, reputation gossip, multi-helper proof aggregation are
-  all module-shaped but bodies are `TODO`.
-- `nautilus-enclave/nsm` `aws`-feature path is `unimplemented!()`;
-  mock path returns deterministic PCRs for dev.
-- `Containerfile` is a skeleton — does not yet produce a real `.eif`.
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/chat/completions` | Runs the auction, returns `{ request_id, node_url, dispatch_token, session_id }` |
+| `GET /v1/proofs/{request_id}` | Signed routing receipt + bundled proofs |
+| `GET /v1/nodes` | Current peer registry snapshot |
+| `GET /v1/admin/sessions/{session_id}` | Session turns + warm-node cache rows (debug) |
+| `GET /health`, `GET /metrics` | Liveness + Prometheus |
+| `GET /enclave_health` | Coordinator pubkey, uptime, registered Sui enclave object id |
+| `GET /get_attestation` | NSM attestation document |
 
 ## Running
 
-Local dev (no enclave, mock NSM):
+Local dev (no enclave, mock NSM) requires `DATABASE_URL` and
+`REDIS_URL` — there is no in-memory fallback:
 
 ```bash
-cargo run -p coordinator
+DATABASE_URL=postgres://... REDIS_URL=redis://... cargo run -p coordinator
 ```
 
-By default binds `127.0.0.1:4000`. Override with `PINAIVU_BIND`:
-
-```bash
-PINAIVU_BIND=0.0.0.0:8080 cargo run -p coordinator
-```
-
-Probe the endpoints:
+By default binds `127.0.0.1:4000`. Override with `PINAIVU_BIND`.
 
 ```bash
 curl http://127.0.0.1:4000/health
-# ok
-
 curl http://127.0.0.1:4000/enclave_health | jq
-# { "public_key_hex": "...", "uptime_ms": 1234 }
-
 curl http://127.0.0.1:4000/get_attestation | jq
-# { "pcr0": "...", "pcr1": "...", "pcr2": "...",
-#   "public_key": "...", "timestamp_ms": 0, "raw_cbor_hex": "" }
 ```
 
 ## Tests
@@ -110,34 +108,26 @@ curl http://127.0.0.1:4000/get_attestation | jq
 cargo test --workspace
 ```
 
-| Suite | Count |
-|---|---|
-| Protocol crypto (sign / verify / tamper) | 16 |
-| Marketplace auction (scoring + window) | 4 |
-| nautilus-enclave (keypair + NSM mock) | 4 |
-| HTTP smoke (health + attestation) | 3 |
-| Auction integration (mesh → token → verify) | 3 |
-
 ## Building the enclave image
 
-Not yet wired. Final command will be `make eif`; produces
-`coordinator.eif` + `coordinator.pcrs` via a stagex multi-stage build
-declared in `Containerfile`.
+```bash
+make eif
+```
+
+Produces `coordinator.eif` + `coordinator.pcrs` via a stagex
+multi-stage build. Rebuilding from the same source produces identical
+PCRs (reproducible build), which is what `pinaivu::enclave::update_pcrs`
+checks against on-chain before registration succeeds.
 
 ## Parent-host forwarders
 
-`parent_forwarder.sh` runs on the EC2 host (not inside the enclave)
-and bridges:
-
-- Inbound: `TCP:443 ↔ VSOCK:4000` (client API)
-- Outbound: VSOCK → Postgres / Redis / libp2p bootstrap peers / RPCs
-
-Skeleton only at this point.
+`parent_forwarder.sh` runs on the EC2 host (not inside the enclave) and
+bridges inbound client traffic (`TCP:443 ↔ VSOCK:4000`) and outbound
+traffic to Postgres, Redis, libp2p bootstrap peers, and Sui RPC.
 
 ## Layout convention
 
-Every module folder owns one concern. Public types are re-exported
-from the folder's `mod.rs` so callers write
-`crate::protocol::ProofOfInference` rather than
-`crate::protocol::proof::ProofOfInference`. No loose source files at
-the root of `src/coordinator/src/`.
+Every module folder owns one concern. Public types are re-exported from
+the folder's `mod.rs` so callers write `crate::protocol::ProofOfInference`
+rather than `crate::protocol::proof::ProofOfInference`. No loose source
+files at the root of `src/coordinator/src/`.
